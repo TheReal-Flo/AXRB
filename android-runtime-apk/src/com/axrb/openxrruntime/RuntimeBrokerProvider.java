@@ -190,7 +190,7 @@ public final class RuntimeBrokerProvider extends ContentProvider {
         }
         lastConnectAttemptMs = nowMs;
 
-        String[] hosts = {"127.0.0.1", "192.168.240.1", "10.0.2.2"};
+        String[] hosts = {"172.26.32.1", "127.0.0.1", "192.168.240.1", "10.0.2.2"};
         for (String host : hosts) {
             try {
                 Socket candidate = new Socket();

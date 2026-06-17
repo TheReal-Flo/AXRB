@@ -6,6 +6,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <cstdio>
@@ -74,6 +75,7 @@ enum class SpaceKind {
 struct SpaceRecord {
     RuntimeHandle handle{};
     SpaceKind kind = SpaceKind::Reference;
+    XrPosef offsetInParent{};
 };
 
 struct PathRecord {
@@ -133,7 +135,14 @@ XrSpace fake_space()
     return reinterpret_cast<XrSpace>(&g_spaceHandle);
 }
 
-XrSpace make_space(SpaceKind kind)
+XrPosef identity_pose()
+{
+    XrPosef pose{};
+    pose.orientation.w = 1.0f;
+    return pose;
+}
+
+XrSpace make_space(SpaceKind kind, const XrPosef& offsetInParent = identity_pose())
 {
     if (g_spaceCount >= g_spaces.size()) {
         return nullptr;
@@ -141,6 +150,7 @@ XrSpace make_space(SpaceKind kind)
     SpaceRecord& record = g_spaces[g_spaceCount];
     record.handle.magic = 0xAABBCCDD00000200ULL + g_spaceCount;
     record.kind = kind;
+    record.offsetInParent = offsetInParent;
     ++g_spaceCount;
     return reinterpret_cast<XrSpace>(&record.handle);
 }
@@ -156,6 +166,7 @@ SpaceRecord* find_space(XrSpace space)
         static SpaceRecord legacy{};
         legacy.handle = g_spaceHandle;
         legacy.kind = SpaceKind::Reference;
+        legacy.offsetInParent = identity_pose();
         return &legacy;
     }
     return nullptr;
@@ -239,6 +250,102 @@ XrPosef protocol_pose_to_xr(const axrb::protocol::Pose& pose)
     out.position.y = pose.y;
     out.position.z = pose.z;
     return out;
+}
+
+XrPosef normalize_pose(XrPosef pose)
+{
+    const float length = std::sqrt(
+        pose.orientation.x * pose.orientation.x +
+        pose.orientation.y * pose.orientation.y +
+        pose.orientation.z * pose.orientation.z +
+        pose.orientation.w * pose.orientation.w);
+    if (length > 0.00001f) {
+        pose.orientation.x /= length;
+        pose.orientation.y /= length;
+        pose.orientation.z /= length;
+        pose.orientation.w /= length;
+    } else {
+        pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    }
+    return pose;
+}
+
+XrPosef multiply_pose(const XrPosef& a, const XrPosef& b)
+{
+    XrPosef out{};
+    const float ax = a.orientation.x;
+    const float ay = a.orientation.y;
+    const float az = a.orientation.z;
+    const float aw = a.orientation.w;
+    const float bx = b.orientation.x;
+    const float by = b.orientation.y;
+    const float bz = b.orientation.z;
+    const float bw = b.orientation.w;
+
+    out.orientation.x = aw * bx + ax * bw + ay * bz - az * by;
+    out.orientation.y = aw * by - ax * bz + ay * bw + az * bx;
+    out.orientation.z = aw * bz + ax * by - ay * bx + az * bw;
+    out.orientation.w = aw * bw - ax * bx - ay * by - az * bz;
+
+    const float vx = b.position.x;
+    const float vy = b.position.y;
+    const float vz = b.position.z;
+    const float tx = 2.0f * (ay * vz - az * vy);
+    const float ty = 2.0f * (az * vx - ax * vz);
+    const float tz = 2.0f * (ax * vy - ay * vx);
+    const float rx = vx + aw * tx + (ay * tz - az * ty);
+    const float ry = vy + aw * ty + (az * tx - ax * tz);
+    const float rz = vz + aw * tz + (ax * ty - ay * tx);
+
+    out.position.x = a.position.x + rx;
+    out.position.y = a.position.y + ry;
+    out.position.z = a.position.z + rz;
+    return normalize_pose(out);
+}
+
+XrPosef inverse_pose(const XrPosef& pose)
+{
+    XrPosef inverse{};
+    inverse.orientation.x = -pose.orientation.x;
+    inverse.orientation.y = -pose.orientation.y;
+    inverse.orientation.z = -pose.orientation.z;
+    inverse.orientation.w = pose.orientation.w;
+
+    const float px = -pose.position.x;
+    const float py = -pose.position.y;
+    const float pz = -pose.position.z;
+    const float qx = inverse.orientation.x;
+    const float qy = inverse.orientation.y;
+    const float qz = inverse.orientation.z;
+    const float qw = inverse.orientation.w;
+    const float tx = 2.0f * (qy * pz - qz * py);
+    const float ty = 2.0f * (qz * px - qx * pz);
+    const float tz = 2.0f * (qx * py - qy * px);
+    inverse.position.x = px + qw * tx + (qy * tz - qz * ty);
+    inverse.position.y = py + qw * ty + (qz * tx - qx * tz);
+    inverse.position.z = pz + qw * tz + (qx * ty - qy * tx);
+    return normalize_pose(inverse);
+}
+
+XrPosef world_pose_for_space(const SpaceRecord& record, const axrb::protocol::PoseFrame& poseFrame)
+{
+    XrPosef base = identity_pose();
+    switch (record.kind) {
+    case SpaceKind::View:
+        base = protocol_pose_to_xr(poseFrame.hmd);
+        break;
+    case SpaceKind::LeftHand:
+        base = protocol_pose_to_xr(poseFrame.left_controller);
+        break;
+    case SpaceKind::RightHand:
+        base = protocol_pose_to_xr(poseFrame.right_controller);
+        break;
+    case SpaceKind::Reference:
+    default:
+        base = identity_pose();
+        break;
+    }
+    return multiply_pose(base, record.offsetInParent);
 }
 
 XrTime monotonic_time_ns()
@@ -1320,7 +1427,9 @@ XrResult XRAPI_CALL xrCreateReferenceSpace_impl(
         return XR_ERROR_REFERENCE_SPACE_UNSUPPORTED;
     }
 
-    *space = make_space(createInfo->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW ? SpaceKind::View : SpaceKind::Reference);
+    *space = make_space(
+        createInfo->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW ? SpaceKind::View : SpaceKind::Reference,
+        createInfo->poseInReferenceSpace);
     if (*space == nullptr) {
         return XR_ERROR_OUT_OF_MEMORY;
     }
@@ -1456,7 +1565,7 @@ XrResult XRAPI_CALL xrCreateActionSpace_impl(
         !is_valid_action(createInfo->action)) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    *space = make_space(action_space_kind(createInfo->subactionPath));
+    *space = make_space(action_space_kind(createInfo->subactionPath), createInfo->poseInActionSpace);
     if (*space == nullptr) {
         return XR_ERROR_OUT_OF_MEMORY;
     }
@@ -1485,22 +1594,9 @@ XrResult XRAPI_CALL xrLocateSpace_impl(
         XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
         XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
     const axrb::protocol::PoseFrame& poseFrame = pose_client().latest_pose_frame();
-    switch (spaceRecord->kind) {
-    case SpaceKind::View:
-        location->pose = protocol_pose_to_xr(poseFrame.hmd);
-        break;
-    case SpaceKind::LeftHand:
-        location->pose = protocol_pose_to_xr(poseFrame.left_controller);
-        break;
-    case SpaceKind::RightHand:
-        location->pose = protocol_pose_to_xr(poseFrame.right_controller);
-        break;
-    case SpaceKind::Reference:
-    default:
-        location->pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
-        location->pose.position = {0.0f, 0.0f, 0.0f};
-        break;
-    }
+    const XrPosef spaceWorld = world_pose_for_space(*spaceRecord, poseFrame);
+    const XrPosef baseWorld = world_pose_for_space(*baseRecord, poseFrame);
+    location->pose = multiply_pose(inverse_pose(baseWorld), spaceWorld);
     return XR_SUCCESS;
 }
 
