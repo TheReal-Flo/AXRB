@@ -38,6 +38,7 @@ axrb-windows-bridge.*.log
 *.suo
 *.pdb
 *.ilk
+*.obj
 *.VC.db
 *.VC.VC.opendb
 
