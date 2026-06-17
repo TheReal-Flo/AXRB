@@ -53,6 +53,7 @@ Known limitations:
 - CPU readback and socket transport are slow.
 - The current image path is for validation, not low-latency VR.
 - The Windows/WSL path is useful for development, but it is not the right target for zero-copy frame transport.
+- WSL/Waydroid currently reports Android Vulkan through SwiftShader/CPU on the tested setup, not hardware Vulkan.
 - Real 90 FPS requires the Linux GPU-sharing path: Vulkan external memory, dma-buf, and explicit sync.
 
 ## Repository Layout
@@ -124,6 +125,21 @@ adb logcat -s AXRB.Image AXRB.ImageProxy AXRB.PoseBroker OpenXR-Loader
 ```
 
 Host logs are written to stderr by `axrb-host-bridge`.
+
+Check whether Waydroid exposes hardware Vulkan to Android:
+
+```sh
+tools/waydroid_vulkan_probe.sh
+```
+
+On native Linux with a real DRM render node, configure Waydroid explicitly:
+
+```sh
+sudo tools/waydroid_vulkan_probe.sh --configure-waydroid-dri /dev/dri/renderD128
+```
+
+See `docs/hardware_vulkan_waydroid.md` for the WSL versus native Linux hardware
+Vulkan findings.
 
 Linux dma-buf descriptor receiver:
 

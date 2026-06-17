@@ -10,6 +10,7 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.DataInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -95,7 +96,7 @@ public final class RuntimeBrokerProvider extends ContentProvider {
             ApplicationInfo appInfo = getContext().getApplicationInfo();
             cursor.addRow(new Object[] {
                 getContext().getPackageName(),
-                appInfo.nativeLibraryDir,
+                getRuntimeNativeLibDir(appInfo, segments.get(3)),
                 "libopenxr_runtime.so",
                 0
             });
@@ -148,6 +149,53 @@ public final class RuntimeBrokerProvider extends ContentProvider {
             return cursor;
         }
 
+        return null;
+    }
+
+    private static String getRuntimeNativeLibDir(ApplicationInfo appInfo, String abi) {
+        String systemDir = getSystemRuntimeNativeLibDir(appInfo, abi);
+        if (systemDir != null) {
+            return systemDir;
+        }
+        return appInfo.nativeLibraryDir;
+    }
+
+    private static String getSystemRuntimeNativeLibDir(ApplicationInfo appInfo, String abi) {
+        if (appInfo.sourceDir == null) {
+            return null;
+        }
+
+        File appDir = new File(appInfo.sourceDir).getParentFile();
+        if (appDir == null) {
+            return null;
+        }
+
+        String libSubdir = getSystemRuntimeLibSubdir(abi);
+        if (libSubdir == null) {
+            return null;
+        }
+
+        File candidate = new File(new File(appDir, "lib"), libSubdir);
+        if (new File(candidate, "libopenxr_runtime.so").isFile()) {
+            return candidate.getAbsolutePath();
+        }
+
+        return null;
+    }
+
+    private static String getSystemRuntimeLibSubdir(String abi) {
+        if ("arm64-v8a".equals(abi)) {
+            return "arm64";
+        }
+        if ("armeabi-v7a".equals(abi) || "armeabi".equals(abi)) {
+            return "arm";
+        }
+        if ("x86_64".equals(abi)) {
+            return "x86_64";
+        }
+        if ("x86".equals(abi)) {
+            return "x86";
+        }
         return null;
     }
 
