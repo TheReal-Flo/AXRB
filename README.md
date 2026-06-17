@@ -45,6 +45,7 @@ Implemented:
 - Android local socket image proxy in the runtime APK
 - TCP image receiver on the host bridge
 - 512x512 proof-of-concept frame upload into SteamVR
+- Linux dma-buf frame descriptor and Unix FD-passing transport foundation
 
 Known limitations:
 
@@ -123,6 +124,14 @@ adb logcat -s AXRB.Image AXRB.ImageProxy AXRB.PoseBroker OpenXR-Loader
 
 Host logs are written to stderr by `axrb-host-bridge`.
 
+Linux dma-buf descriptor receiver:
+
+```sh
+./build-wsl/host-bridge/axrb-host-bridge --serve-gpu-fds /tmp/axrb-gpu-frame.sock
+```
+
+This mode currently validates and logs dma-buf descriptors passed over a Unix domain socket. Vulkan import and OpenXR submission are the next steps for this path.
+
 ## Performance Direction
 
 The CPU path currently does this:
@@ -151,6 +160,7 @@ Android/Waydroid Vulkan image
 ```
 
 That path should avoid CPU copies and is the correct next major milestone for low-latency rendering.
+See `docs/linux_gpu_transport.md` for the current implementation breakdown.
 
 ## Legal And Compatibility Notes
 

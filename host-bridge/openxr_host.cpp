@@ -1,5 +1,6 @@
 #include "openxr_host.h"
 
+#include "gpu_transport.h"
 #include "image_transport.h"
 #include "transport_tcp.h"
 
@@ -65,6 +66,7 @@ void print_usage()
     std::fprintf(stderr, "Usage:\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve [port] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve-openxr [port] [frames]\n");
+    std::fprintf(stderr, "  axrb-host-bridge --serve-gpu-fds [socket-path] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --smoke\n");
 }
 
@@ -1254,6 +1256,30 @@ int OpenXrHost::run(int argc, char** argv)
     }
 
     const std::string_view mode(argv[1]);
+    if (mode == "--serve-gpu-fds") {
+        const char* socket_path = argc >= 3 ? argv[2] : "/tmp/axrb-gpu-frame.sock";
+        uint32_t frames = 0;
+        if (argc >= 4 && !parse_u32(argv[3], &frames)) {
+            std::fprintf(stderr, "Invalid frame count: %s\n", argv[3]);
+            return 2;
+        }
+
+        axrb::protocol::UnixFdFrameServer server;
+        return server.serve(socket_path, frames, [](const axrb::protocol::GpuFrameDescriptor& descriptor,
+                                                    std::vector<axrb::protocol::UniqueFd>&& fds) {
+            std::fprintf(stderr,
+                         "AXRB GPU: frame seq=%llu %ux%u layers=%u drm_format=0x%llx modifier=0x%llx planes=%u fds=%zu\n",
+                         static_cast<unsigned long long>(descriptor.sequence),
+                         descriptor.width,
+                         descriptor.height,
+                         descriptor.layers,
+                         static_cast<unsigned long long>(descriptor.drm_format),
+                         static_cast<unsigned long long>(descriptor.drm_modifier),
+                         descriptor.plane_count,
+                         fds.size());
+        });
+    }
+
     if (mode != "--serve" && mode != "--serve-openxr") {
         print_usage();
         return 2;

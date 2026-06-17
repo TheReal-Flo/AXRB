@@ -1,4 +1,5 @@
 add_library(axrb_protocol STATIC
+  gpu_transport.cpp
   image_transport.cpp
   transport_tcp.cpp
   transport_shm.cpp

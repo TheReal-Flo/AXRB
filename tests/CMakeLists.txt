@@ -11,4 +11,10 @@ set_tests_properties(axrb_runtime_negotiates_and_frames PROPERTIES
   ENVIRONMENT "PATH=$<TARGET_FILE_DIR:openxr_runtime>;$ENV{PATH}"
 )
 
+if(NOT WIN32)
+  add_executable(axrb_gpu_transport_smoke gpu_transport_smoke.cpp)
+  target_link_libraries(axrb_gpu_transport_smoke PRIVATE axrb_protocol)
+  add_test(NAME axrb_gpu_transport_passes_fd COMMAND axrb_gpu_transport_smoke)
+endif()
+
 add_subdirectory(hello_xr)
