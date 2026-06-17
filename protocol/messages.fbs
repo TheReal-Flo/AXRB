@@ -1,0 +1,27 @@
+namespace axrb.protocol;
+
+enum MessageType : ushort {
+  Unknown = 0,
+  PoseFrame = 1,
+  FrameSubmitted = 2,
+  InputState = 3
+}
+
+table Pose {
+  x:float;
+  y:float;
+  z:float;
+  qx:float;
+  qy:float;
+  qz:float;
+  qw:float = 1.0;
+}
+
+table PoseFrame {
+  monotonic_time_ns:ulong;
+  hmd:Pose;
+  left_controller:Pose;
+  right_controller:Pose;
+}
+
+root_type PoseFrame;

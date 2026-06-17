@@ -1,0 +1,23 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.axrb.openxrruntime"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <uses-sdk
+        android:minSdkVersion="29"
+        android:targetSdkVersion="29" />
+
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:label="AXRB OpenXR Runtime">
+
+        <provider
+            android:name=".RuntimeBrokerProvider"
+            android:authorities="org.khronos.openxr.system_runtime_broker"
+            android:exported="true" />
+    </application>
+</manifest>

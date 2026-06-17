@@ -1,0 +1,54 @@
+# Build outputs
+build/
+build-*/
+out/
+dist/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+
+# Generated Android artifacts
+*.apk
+*.idsig
+*.aab
+*.dex
+*.class
+*.keystore
+*.jks
+*.so
+*.a
+
+# Vendored dependencies and SDK checkouts
+third_party/
+
+# Runtime logs and local traces
+*.log
+*.trace
+*.tombstone
+axrb-windows-bridge.*.log
+
+# IDE/editor state
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.pdb
+*.ilk
+*.VC.db
+*.VC.VC.opendb
+
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
