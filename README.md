@@ -46,6 +46,7 @@ Implemented:
 - TCP image receiver on the host bridge
 - 512x512 proof-of-concept frame upload into SteamVR
 - Linux dma-buf frame descriptor and Unix FD-passing transport foundation
+- UDP encoded-video transport foundation for the Windows/WSL fallback path
 
 Known limitations:
 
@@ -131,6 +132,18 @@ Linux dma-buf descriptor receiver:
 ```
 
 This mode currently validates and logs dma-buf descriptors passed over a Unix domain socket. Vulkan import and OpenXR submission are the next steps for this path.
+
+Synthetic encoded-video UDP transport test:
+
+```powershell
+.\build\host-bridge\Debug\axrb-host-bridge.exe --video-recv-udp 38492 180
+```
+
+```sh
+./build-wsl/host-bridge/axrb-host-bridge --video-send-synthetic "$(ip route | awk '/default/ {print $3; exit}')" 38492 180 90
+```
+
+This verifies the Windows/WSL transport layer only. It does not perform real H.264/HEVC/AV1 encoding or decoding yet.
 
 ## Performance Direction
 

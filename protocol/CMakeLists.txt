@@ -3,6 +3,7 @@ add_library(axrb_protocol STATIC
   image_transport.cpp
   transport_tcp.cpp
   transport_shm.cpp
+  video_transport.cpp
   clock_sync.cpp
 )
 

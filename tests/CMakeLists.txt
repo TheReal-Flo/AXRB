@@ -17,4 +17,8 @@ if(NOT WIN32)
   add_test(NAME axrb_gpu_transport_passes_fd COMMAND axrb_gpu_transport_smoke)
 endif()
 
+add_executable(axrb_video_transport_smoke video_transport_smoke.cpp)
+target_link_libraries(axrb_video_transport_smoke PRIVATE axrb_protocol)
+add_test(NAME axrb_video_transport_reassembles_udp_frames COMMAND axrb_video_transport_smoke)
+
 add_subdirectory(hello_xr)

@@ -3,6 +3,7 @@
 #include "gpu_transport.h"
 #include "image_transport.h"
 #include "transport_tcp.h"
+#include "video_transport.h"
 
 #include <charconv>
 #include <chrono>
@@ -67,6 +68,8 @@ void print_usage()
     std::fprintf(stderr, "  axrb-host-bridge --serve [port] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve-openxr [port] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve-gpu-fds [socket-path] [frames]\n");
+    std::fprintf(stderr, "  axrb-host-bridge --video-recv-udp [port] [frames]\n");
+    std::fprintf(stderr, "  axrb-host-bridge --video-send-synthetic [host] [port] [frames] [fps]\n");
     std::fprintf(stderr, "  axrb-host-bridge --smoke\n");
 }
 
@@ -1278,6 +1281,80 @@ int OpenXrHost::run(int argc, char** argv)
                          descriptor.plane_count,
                          fds.size());
         });
+    }
+
+    if (mode == "--video-recv-udp") {
+        uint16_t port = 38492;
+        uint32_t frames = 0;
+        if (argc >= 3 && !parse_u16(argv[2], &port)) {
+            std::fprintf(stderr, "Invalid port: %s\n", argv[2]);
+            return 2;
+        }
+        if (argc >= 4 && !parse_u32(argv[3], &frames)) {
+            std::fprintf(stderr, "Invalid frame count: %s\n", argv[3]);
+            return 2;
+        }
+
+        uint64_t first_time = 0;
+        uint64_t last_time = 0;
+        uint32_t received = 0;
+        axrb::protocol::UdpVideoReceiver receiver;
+        return receiver.receive(port, frames, [&](axrb::protocol::EncodedVideoFrame&& frame) {
+            if (first_time == 0) {
+                first_time = monotonic_time_ns();
+            }
+            last_time = monotonic_time_ns();
+            ++received;
+            if (received == 1 || received % 90 == 0) {
+                const double seconds = last_time > first_time ? static_cast<double>(last_time - first_time) / 1000000000.0 : 0.0;
+                const double fps = seconds > 0.0 ? static_cast<double>(received - 1) / seconds : 0.0;
+                std::fprintf(stderr,
+                             "AXRB Video UDP: frame=%llu %ux%u codec=%u bytes=%zu avg_fps=%.2f\n",
+                             static_cast<unsigned long long>(frame.frame_id),
+                             frame.width,
+                             frame.height,
+                             frame.codec,
+                             frame.payload.size(),
+                             fps);
+            }
+        });
+    }
+
+    if (mode == "--video-send-synthetic") {
+        const char* host = argc >= 3 ? argv[2] : "127.0.0.1";
+        uint16_t port = 38492;
+        uint32_t frames = 900;
+        uint32_t fps = 90;
+        if (argc >= 4 && !parse_u16(argv[3], &port)) {
+            std::fprintf(stderr, "Invalid port: %s\n", argv[3]);
+            return 2;
+        }
+        if (argc >= 5 && !parse_u32(argv[4], &frames)) {
+            std::fprintf(stderr, "Invalid frame count: %s\n", argv[4]);
+            return 2;
+        }
+        if (argc >= 6 && (!parse_u32(argv[5], &fps) || fps == 0)) {
+            std::fprintf(stderr, "Invalid fps: %s\n", argv[5]);
+            return 2;
+        }
+
+        axrb::protocol::UdpVideoSender sender;
+        if (!sender.open(host, port)) {
+            return 1;
+        }
+
+        const auto frame_interval = std::chrono::nanoseconds(1000000000ull / fps);
+        auto next_frame = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < frames; ++i) {
+            auto frame = axrb::protocol::make_synthetic_encoded_frame(i, 1920, 1080, 64 * 1024);
+            if (!sender.send_frame(frame)) {
+                std::fprintf(stderr, "AXRB Video UDP: send failed at frame %u\n", i);
+                return 1;
+            }
+            next_frame += frame_interval;
+            std::this_thread::sleep_until(next_frame);
+        }
+        return 0;
     }
 
     if (mode != "--serve" && mode != "--serve-openxr") {
