@@ -923,26 +923,41 @@ private:
             projectionFormat_ == DXGI_FORMAT_B8G8R8A8_UNORM ||
             projectionFormat_ == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 
-        std::vector<uint8_t> converted;
-        const uint8_t* uploadPixels = pixels->data();
-        uint32_t uploadStride = sourceStride;
-        if (needsBgra) {
-            converted.resize(pixels->size());
-            for (size_t offset = 0; offset + 3 < pixels->size(); offset += 4) {
-                converted[offset + 0] = (*pixels)[offset + 2];
-                converted[offset + 1] = (*pixels)[offset + 1];
-                converted[offset + 2] = (*pixels)[offset + 0];
-                converted[offset + 3] = (*pixels)[offset + 3];
+        std::vector<uint8_t> uploadBuffer(static_cast<size_t>(header.width) * header.height * header.layers * 4);
+        for (uint32_t layer = 0; layer < header.layers; ++layer) {
+            const uint64_t layerOffset = static_cast<uint64_t>(layer) * header.width * header.height * header.bytes_per_pixel;
+            for (uint32_t y = 0; y < header.height; ++y) {
+                const uint32_t sourceY = header.height - 1 - y;
+                const uint64_t sourceRow = layerOffset + static_cast<uint64_t>(sourceY) * sourceStride;
+                const uint64_t destRow =
+                    (static_cast<uint64_t>(layer) * header.width * header.height + static_cast<uint64_t>(y) * header.width) * 4;
+                for (uint32_t x = 0; x < header.width; ++x) {
+                    const uint64_t source = sourceRow + static_cast<uint64_t>(x) * header.bytes_per_pixel;
+                    const uint64_t dest = destRow + static_cast<uint64_t>(x) * 4;
+                    if (needsBgra) {
+                        uploadBuffer[dest + 0] = (*pixels)[source + 2];
+                        uploadBuffer[dest + 1] = (*pixels)[source + 1];
+                        uploadBuffer[dest + 2] = (*pixels)[source + 0];
+                        uploadBuffer[dest + 3] = (*pixels)[source + 3];
+                    } else {
+                        uploadBuffer[dest + 0] = (*pixels)[source + 0];
+                        uploadBuffer[dest + 1] = (*pixels)[source + 1];
+                        uploadBuffer[dest + 2] = (*pixels)[source + 2];
+                        uploadBuffer[dest + 3] = (*pixels)[source + 3];
+                    }
+                }
             }
-            uploadPixels = converted.data();
         }
+
+        const uint8_t* uploadPixels = uploadBuffer.data();
+        const uint32_t uploadStride = header.width * 4;
 
         const uint32_t sourceLayers = header.layers;
         for (uint32_t targetLayer = 0; targetLayer < 2; ++targetLayer) {
             const uint32_t sourceLayer = sourceLayers > 1 ? targetLayer % sourceLayers : 0;
             const uint64_t sourceOffset =
-                static_cast<uint64_t>(sourceLayer) * header.width * header.height * header.bytes_per_pixel;
-            if (sourceOffset >= pixels->size()) {
+                static_cast<uint64_t>(sourceLayer) * header.width * header.height * 4;
+            if (sourceOffset >= uploadBuffer.size()) {
                 continue;
             }
 
