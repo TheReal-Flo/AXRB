@@ -43,6 +43,8 @@ namespace axrb::host {
 
 namespace {
 
+constexpr float kAppProjectionHalfFovRadians = 0.95f;
+
 bool parse_u16(const char* text, uint16_t* value)
 {
     uint32_t parsed = 0;
@@ -841,7 +843,10 @@ private:
         for (uint32_t i = 0; i < 2; ++i) {
             projectionViews[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
             projectionViews[i].pose = views[i].pose;
-            projectionViews[i].fov = views[i].fov;
+            projectionViews[i].fov.angleLeft = -kAppProjectionHalfFovRadians;
+            projectionViews[i].fov.angleRight = kAppProjectionHalfFovRadians;
+            projectionViews[i].fov.angleUp = kAppProjectionHalfFovRadians;
+            projectionViews[i].fov.angleDown = -kAppProjectionHalfFovRadians;
             projectionViews[i].subImage.swapchain = projectionSwapchain_;
             projectionViews[i].subImage.imageRect.offset = {0, 0};
             projectionViews[i].subImage.imageRect.extent = {

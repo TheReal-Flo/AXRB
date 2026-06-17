@@ -33,6 +33,8 @@ namespace axrb::runtime {
 namespace {
 
 constexpr XrSystemId kSystemId = 1;
+constexpr float kEyeHalfIpdMeters = 0.0315f;
+constexpr float kProjectionHalfFovRadians = 0.95f;
 
 #if defined(__ANDROID__)
 struct AndroidLoaderInitInfo {
@@ -1831,24 +1833,24 @@ XrResult XRAPI_CALL xrLocateViews_impl(
         return XR_SUCCESS;
     }
 
+    SpaceRecord* baseRecord = find_space(viewLocateInfo->space);
+    const axrb::protocol::PoseFrame& poseFrame = pose_client().latest_pose_frame();
+    const XrPosef hmdWorld = protocol_pose_to_xr(poseFrame.hmd);
+    const XrPosef baseWorld = world_pose_for_space(*baseRecord, poseFrame);
     const uint32_t count = viewCapacityInput < 2 ? viewCapacityInput : 2;
     for (uint32_t i = 0; i < count; ++i) {
         if (views[i].type != XR_TYPE_VIEW) {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
-        const axrb::protocol::PoseFrame& poseFrame = pose_client().latest_pose_frame();
-        views[i].pose.orientation.x = poseFrame.hmd.qx;
-        views[i].pose.orientation.y = poseFrame.hmd.qy;
-        views[i].pose.orientation.z = poseFrame.hmd.qz;
-        views[i].pose.orientation.w = poseFrame.hmd.qw;
-        views[i].pose.position.x = poseFrame.hmd.x + (i == 0 ? -0.032f : 0.032f);
-        views[i].pose.position.y = poseFrame.hmd.y;
-        views[i].pose.position.z = poseFrame.hmd.z;
-        views[i].fov.angleLeft = -0.75f;
-        views[i].fov.angleRight = 0.75f;
-        views[i].fov.angleUp = 0.75f;
-        views[i].fov.angleDown = -0.75f;
+        XrPosef eyeOffset = identity_pose();
+        eyeOffset.position.x = i == 0 ? -kEyeHalfIpdMeters : kEyeHalfIpdMeters;
+        const XrPosef eyeWorld = multiply_pose(hmdWorld, eyeOffset);
+        views[i].pose = multiply_pose(inverse_pose(baseWorld), eyeWorld);
+        views[i].fov.angleLeft = -kProjectionHalfFovRadians;
+        views[i].fov.angleRight = kProjectionHalfFovRadians;
+        views[i].fov.angleUp = kProjectionHalfFovRadians;
+        views[i].fov.angleDown = -kProjectionHalfFovRadians;
     }
     return XR_SUCCESS;
 }
