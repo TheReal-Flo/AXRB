@@ -56,6 +56,16 @@ Then start the WSL RGBA sender above. The host log should include:
 AXRB OpenXR: submitting Android image frames to SteamVR (160x90 layers=1)
 ```
 
+The Android runtime APK's `ImageProxy` also forwards captured app frames over the same UDP video path:
+
+```text
+Android app frame
+  -> native runtime localabstract socket
+  -> ImageProxy UDP AXRB RGBA8 video packets
+  -> Windows --serve-openxr receiver on 38492
+  -> SteamVR projection layer
+```
+
 ## Verified Result
 
 On the current machine:
@@ -69,6 +79,7 @@ WSL sender -> Windows receiver
 Windows receiver reconstructed all 180 frames
 reported average: about 90 FPS
 RGBA debug frames can be received by --serve-openxr and submitted through the SteamVR projection layer
+Android app frames are forwarded by ImageProxy over UDP video packets
 ```
 
 ## Next Steps
