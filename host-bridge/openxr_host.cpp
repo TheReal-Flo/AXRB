@@ -70,6 +70,7 @@ void print_usage()
     std::fprintf(stderr, "  axrb-host-bridge --serve-gpu-fds [socket-path] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --video-recv-udp [port] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --video-send-synthetic [host] [port] [frames] [fps]\n");
+    std::fprintf(stderr, "  axrb-host-bridge --video-send-rgba [host] [port] [frames] [fps] [width] [height]\n");
     std::fprintf(stderr, "  axrb-host-bridge --smoke\n");
 }
 
@@ -126,6 +127,30 @@ uint64_t monotonic_time_ns()
 {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+bool decode_video_frame_to_image(const axrb::protocol::EncodedVideoFrame& frame,
+                                 axrb::protocol::ImageFrameHeader* header,
+                                 std::vector<uint8_t>* pixels)
+{
+    if (frame.codec != axrb::protocol::kEncodedVideoCodecAxrbRgba8) {
+        return false;
+    }
+    const uint64_t expected = static_cast<uint64_t>(frame.width) * frame.height * 4;
+    if (frame.width == 0 || frame.height == 0 || frame.payload.size() != expected) {
+        return false;
+    }
+
+    axrb::protocol::ImageFrameHeader outHeader{};
+    outHeader.width = frame.width;
+    outHeader.height = frame.height;
+    outHeader.layers = 1;
+    outHeader.sequence = frame.frame_id;
+    outHeader.monotonic_time_ns = frame.capture_time_ns;
+    outHeader.payload_size = expected;
+    *header = outHeader;
+    *pixels = frame.payload;
+    return true;
 }
 
 #if defined(_WIN32)
@@ -1357,6 +1382,53 @@ int OpenXrHost::run(int argc, char** argv)
         return 0;
     }
 
+    if (mode == "--video-send-rgba") {
+        const char* host = argc >= 3 ? argv[2] : "127.0.0.1";
+        uint16_t port = 38492;
+        uint32_t frames = 900;
+        uint32_t fps = 90;
+        uint32_t width = 320;
+        uint32_t height = 180;
+        if (argc >= 4 && !parse_u16(argv[3], &port)) {
+            std::fprintf(stderr, "Invalid port: %s\n", argv[3]);
+            return 2;
+        }
+        if (argc >= 5 && !parse_u32(argv[4], &frames)) {
+            std::fprintf(stderr, "Invalid frame count: %s\n", argv[4]);
+            return 2;
+        }
+        if (argc >= 6 && (!parse_u32(argv[5], &fps) || fps == 0)) {
+            std::fprintf(stderr, "Invalid fps: %s\n", argv[5]);
+            return 2;
+        }
+        if (argc >= 7 && !parse_u32(argv[6], &width)) {
+            std::fprintf(stderr, "Invalid width: %s\n", argv[6]);
+            return 2;
+        }
+        if (argc >= 8 && !parse_u32(argv[7], &height)) {
+            std::fprintf(stderr, "Invalid height: %s\n", argv[7]);
+            return 2;
+        }
+
+        axrb::protocol::UdpVideoSender sender;
+        if (!sender.open(host, port)) {
+            return 1;
+        }
+
+        const auto frame_interval = std::chrono::nanoseconds(1000000000ull / fps);
+        auto next_frame = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < frames; ++i) {
+            auto frame = axrb::protocol::make_synthetic_rgba_frame(i, width, height);
+            if (!sender.send_frame(frame)) {
+                std::fprintf(stderr, "AXRB Video UDP: RGBA send failed at frame %u\n", i);
+                return 1;
+            }
+            next_frame += frame_interval;
+            std::this_thread::sleep_until(next_frame);
+        }
+        return 0;
+    }
+
     if (mode != "--serve" && mode != "--serve-openxr") {
         print_usage();
         return 2;
@@ -1390,6 +1462,24 @@ int OpenXrHost::run(int argc, char** argv)
                 });
         });
         imageThread.detach();
+
+        std::thread videoThread([&] {
+            axrb::protocol::UdpVideoReceiver videoReceiver;
+            videoReceiver.receive(38492, 0, [&](axrb::protocol::EncodedVideoFrame&& frame) {
+                axrb::protocol::ImageFrameHeader header{};
+                std::vector<uint8_t> pixels;
+                if (!decode_video_frame_to_image(frame, &header, &pixels)) {
+                    static bool reportedUnsupported = false;
+                    if (!reportedUnsupported) {
+                        std::fprintf(stderr, "AXRB Video UDP: received unsupported codec %u for OpenXR image feed\n", frame.codec);
+                        reportedUnsupported = true;
+                    }
+                    return;
+                }
+                imageFrame.store(header, std::move(pixels));
+            });
+        });
+        videoThread.detach();
 
         std::thread poseThread([&] {
             server.serve_with_producer(port, frames, [&](uint64_t sequence) {

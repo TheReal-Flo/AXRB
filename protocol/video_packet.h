@@ -14,6 +14,7 @@ enum EncodedVideoCodec : uint32_t {
     kEncodedVideoCodecH264AnnexB = 1,
     kEncodedVideoCodecHevcAnnexB = 2,
     kEncodedVideoCodecAv1Obu = 3,
+    kEncodedVideoCodecAxrbRgba8 = 100,
 };
 
 enum EncodedVideoPacketFlags : uint16_t {

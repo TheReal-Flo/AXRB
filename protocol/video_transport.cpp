@@ -286,6 +286,9 @@ int UdpVideoReceiver::receive(uint16_t port, uint32_t max_frames, const FrameCal
                          "AXRB Video UDP: receive timeout after %u complete frames, invalid_packets=%u\n",
                          static_cast<unsigned>(completed),
                          static_cast<unsigned>(invalid_packets));
+            if (max_frames == 0) {
+                continue;
+            }
             close_socket(socket);
             return completed == max_frames ? 0 : 1;
         }
@@ -361,6 +364,31 @@ EncodedVideoFrame make_synthetic_encoded_frame(uint64_t frame_id, uint32_t width
     frame.payload.resize(payload_size);
     for (uint32_t i = 0; i < payload_size; ++i) {
         frame.payload[i] = static_cast<uint8_t>((frame_id * 31 + i * 17) & 0xff);
+    }
+    return frame;
+}
+
+EncodedVideoFrame make_synthetic_rgba_frame(uint64_t frame_id, uint32_t width, uint32_t height)
+{
+    EncodedVideoFrame frame{};
+    frame.codec = kEncodedVideoCodecAxrbRgba8;
+    frame.frame_id = frame_id;
+    frame.capture_time_ns = monotonic_time_ns();
+    frame.width = width;
+    frame.height = height;
+    frame.key_frame = true;
+    frame.payload.resize(static_cast<size_t>(width) * height * 4);
+
+    const uint32_t tick = static_cast<uint32_t>(frame_id);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const size_t offset = (static_cast<size_t>(y) * width + x) * 4;
+            const bool marker = ((x / 16 + y / 16 + tick) % 2) == 0;
+            frame.payload[offset + 0] = static_cast<uint8_t>((x * 255u) / (width > 1 ? width - 1 : 1));
+            frame.payload[offset + 1] = static_cast<uint8_t>((y * 255u) / (height > 1 ? height - 1 : 1));
+            frame.payload[offset + 2] = marker ? 255 : static_cast<uint8_t>((tick * 7u) & 0xff);
+            frame.payload[offset + 3] = 255;
+        }
     }
     return frame;
 }

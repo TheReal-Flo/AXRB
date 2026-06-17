@@ -38,6 +38,24 @@ Send a synthetic 90 FPS stream from WSL:
 
 Replace `172.26.32.1` with the default gateway printed by `ip route`.
 
+Send a visible RGBA debug stream from WSL:
+
+```sh
+./build-wsl/host-bridge/axrb-host-bridge --video-send-rgba 172.26.32.1 38492 900 90 160 90
+```
+
+Run the SteamVR/OpenXR bridge and consume UDP video frames:
+
+```powershell
+.\build\host-bridge\Debug\axrb-host-bridge.exe --serve-openxr 38490
+```
+
+Then start the WSL RGBA sender above. The host log should include:
+
+```text
+AXRB OpenXR: submitting Android image frames to SteamVR (160x90 layers=1)
+```
+
 ## Verified Result
 
 On the current machine:
@@ -50,12 +68,13 @@ WSL sender -> Windows receiver
 90 FPS target
 Windows receiver reconstructed all 180 frames
 reported average: about 90 FPS
+RGBA debug frames can be received by --serve-openxr and submitted through the SteamVR projection layer
 ```
 
 ## Next Steps
 
 1. Add a real WSL encoder source that produces H.264 Annex B frames.
 2. Feed encoded access units into `UdpVideoSender`.
-3. Add a Windows decoder stage that converts received frames into D3D textures.
-4. Submit decoded textures through the existing Windows OpenXR/SteamVR path.
+3. Add a Windows decoder stage that converts received frames into RGBA/D3D textures.
+4. Replace the RGBA debug codec path with decoded H.264/HEVC frames.
 5. Add timing metadata and drop policy based on predicted display time.

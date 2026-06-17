@@ -143,7 +143,17 @@ Synthetic encoded-video UDP transport test:
 ./build-wsl/host-bridge/axrb-host-bridge --video-send-synthetic "$(ip route | awk '/default/ {print $3; exit}')" 38492 180 90
 ```
 
-This verifies the Windows/WSL transport layer only. It does not perform real H.264/HEVC/AV1 encoding or decoding yet.
+Visible UDP video feed into the Windows OpenXR/SteamVR bridge:
+
+```powershell
+.\build\host-bridge\Debug\axrb-host-bridge.exe --serve-openxr 38490
+```
+
+```sh
+./build-wsl/host-bridge/axrb-host-bridge --video-send-rgba "$(ip route | awk '/default/ {print $3; exit}')" 38492 900 90 160 90
+```
+
+This currently uses AXRB's debug RGBA video codec over the same UDP transport. It proves the transport and headset submission path, but it is not the final H.264/HEVC hardware encode/decode path yet.
 
 ## Performance Direction
 

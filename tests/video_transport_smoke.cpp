@@ -45,5 +45,11 @@ int main()
     }
 
     receiver_thread.join();
-    return received_frames == kFrames && payload_ok ? EXIT_SUCCESS : EXIT_FAILURE;
+    const auto rgba = axrb::protocol::make_synthetic_rgba_frame(7, 64, 32);
+    const bool rgba_ok = rgba.codec == axrb::protocol::kEncodedVideoCodecAxrbRgba8 &&
+        rgba.width == 64 &&
+        rgba.height == 32 &&
+        rgba.payload.size() == 64u * 32u * 4u;
+
+    return received_frames == kFrames && payload_ok && rgba_ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

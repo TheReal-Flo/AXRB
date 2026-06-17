@@ -40,5 +40,6 @@ public:
 };
 
 EncodedVideoFrame make_synthetic_encoded_frame(uint64_t frame_id, uint32_t width, uint32_t height, uint32_t payload_size);
+EncodedVideoFrame make_synthetic_rgba_frame(uint64_t frame_id, uint32_t width, uint32_t height);
 
 } // namespace axrb::protocol
