@@ -3,7 +3,8 @@ param(
     [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",
     [ValidatePattern('^[a-zA-Z0-9_-]+$')][string]$Avd = 'axrb-nvidia-api34',
     [ValidateRange(5554, 5682)][int]$Port = 5580,
-    [string]$RuntimeApk = "$PSScriptRoot\..\build-android-runtime-windows-x86_64\axrb-openxr-runtime-debug.apk",
+    [ValidateSet('x86_64', 'arm64-v8a')][string]$Abi = 'x86_64',
+    [string]$RuntimeApk,
     [string]$AppApk,
     [switch]$ShowWindow
 )
@@ -12,6 +13,7 @@ if ($Port % 2) { throw 'Emulator console port must be even.' }
 $adb = Join-Path $Sdk 'platform-tools\adb.exe'
 $emulator = Join-Path $Sdk 'emulator\emulator.exe'
 $serial = "emulator-$Port"
+if (!$RuntimeApk) { $RuntimeApk = "$PSScriptRoot\..\build-android-runtime-windows-$Abi\axrb-openxr-runtime-debug.apk" }
 $image = 'system-images;android-34;google_apis;x86_64'
 $logs = Join-Path (Split-Path $PSScriptRoot -Parent) 'build-windows-emulator'
 function Run([string]$Exe, [string[]]$Arguments) {
@@ -41,6 +43,19 @@ function Verify-Gpu {
     Write-Host $gles
     $devices | ForEach-Object { Write-Host "Vulkan: $($_.properties.deviceName) (vendor $($_.properties.vendorID), type $($_.properties.deviceType))" }
 }
+function Verify-Abi {
+    $abis = (& $adb -s $serial shell getprop ro.product.cpu.abilist) -join ''
+    if ($LASTEXITCODE -ne 0 -or $Abi -notin $abis.Trim().Split(',')) {
+        throw "Guest does not support requested ABI $Abi (advertised: $abis)."
+    }
+    if ($Abi -eq 'arm64-v8a') {
+        $bridge = ((& $adb -s $serial shell getprop ro.dalvik.vm.native.bridge) -join '').Trim()
+        if ($LASTEXITCODE -ne 0 -or !$bridge -or $bridge -eq '0') {
+            throw 'ARM64 on this x86_64 AVD requires an enabled native bridge.'
+        }
+        Write-Host "ARM64 native bridge: $bridge; guest ABIs: $abis"
+    }
+}
 switch ($Action) {
     Setup {
         Run "$Sdk\cmdline-tools\latest\bin\sdkmanager.bat" @($image)
@@ -68,7 +83,7 @@ switch ($Action) {
             if ($process.HasExited) { throw "Emulator exited; see $logs" }
         } while ((Get-Date) -lt $deadline)
         if ($boot -ne '1') { throw "Boot timed out; see $logs" }
-        try { Verify-Gpu } catch {
+        try { Verify-Gpu; Verify-Abi } catch {
             & $adb -s $serial emu kill | Out-Null
             throw
         }
@@ -76,9 +91,10 @@ switch ($Action) {
         Run $adb @('-s', $serial, 'reverse', 'tcp:38491', 'tcp:38491')
         Write-Host "Ready: $serial. Images use adb reverse :38491; native pose stream uses 10.0.2.2:38490."
     }
-    Verify { Verify-Gpu }
+    Verify { Verify-Gpu; Verify-Abi }
     Install {
         Verify-Gpu
+        Verify-Abi
         Run $adb @('-s', $serial, 'install', '-r', $RuntimeApk)
         Run $adb @('-s', $serial, 'reverse', 'tcp:38490', 'tcp:38490')
         Run $adb @('-s', $serial, 'reverse', 'tcp:38491', 'tcp:38491')

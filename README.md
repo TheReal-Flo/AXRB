@@ -11,6 +11,9 @@ The current prototype proves the loader/runtime integration path and a basic CPU
 An experimental Android Emulator / Gfxstream path uses native Windows host GPU
 rendering, with no WSL. PowerShell build, launch and GPU-verification scripts
 are described in [Windows Nvidia setup](docs/windows_nvidia_emulator.md).
+The ARM64-only GLES sample also runs through the emulator's bundled ARM64
+translator with Nvidia rendering and stereo frame delivery; see
+[ARM64 build and verification](docs/windows_nvidia_emulator.md#arm64-translation).
 The existing GLES frame transport still uses CPU readback; OpenXR Vulkan
 swapchains and arbitrary game compatibility remain unfinished.
 

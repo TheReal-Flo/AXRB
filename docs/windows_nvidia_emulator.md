@@ -70,6 +70,63 @@ The tested checkout was OpenXR-SDK-Source commit
 `c07ad64839653712190e05dbd8cf460e1d239513` with the workspace's existing sample
 edits; the build helper preserves those edits.
 
+## ARM64 translation
+
+The API 34 Google APIs x86_64 image already includes Google's
+`libndk_translation.so` native bridge and advertises `x86_64,arm64-v8a`.
+No additional translator installation, WSL, root, or security changes are
+needed. ARM64 application and runtime code is translated on the CPU; GLES
+continues through Gfxstream to the Nvidia GPU. Google's background explanation
+is [Run ARM apps on the Android Emulator](https://android-developers.googleblog.com/2020/03/run-arm-apps-on-android-emulator.html).
+
+With the emulator running, build and install the ARM64 runtime and sample:
+
+```powershell
+.\android-runtime-apk\build_apk.ps1 -Abi arm64-v8a
+.\tests\hello_xr\build_emulator.ps1 -Abi arm64-v8a
+.\tools\windows_android_emulator.ps1 -Action Install -Abi arm64-v8a -AppApk .\build-hello-xr-windows-arm64-v8a\hello-xr-emulator.apk
+```
+
+Start the Windows host with `--serve-openxr 38490` as above, then run:
+
+```powershell
+.\tools\test_arm64_emulator.ps1
+```
+
+The smoke test restarts the sample and verifies the installed APK contains only
+AArch64 ELF libraries, both installed packages select `arm64-v8a`, the broker
+returns the correct runtime architecture, and the app logs Nvidia GLES, live
+tracking, and multiple successful stereo transmissions. Evidence is saved to
+`build-windows-emulator/arm64-smoke.log`. It does not measure headset latency or
+replace a visual headset check. To launch without repeating the test:
+
+```powershell
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s emulator-5580 shell am start -n com.axrb.helloxr.emulator.arm64/android.app.NativeActivity
+```
+
+On this PC the ARM64-only `hello_xr` and ARM64 runtime successfully rendered
+with the RTX 5070 Ti and delivered two 512x512 eye images to the Windows host,
+typically around 89-90 stereo frames/sec in headset standby. This is a small
+sample workload, not a performance guarantee for games. The installed sample's
+`primaryCpuAbi` is `arm64-v8a`, with no x86 library fallback.
+
+The runtime APK currently contains one ABI at a time. Both builds use the same
+debug signing key so installing one replaces the other without uninstalling.
+The two sample packages coexist, but the active runtime must match the sample.
+To switch back, stop the ARM64 sample and reinstall the x86_64 runtime:
+
+```powershell
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s emulator-5580 shell am force-stop com.axrb.helloxr.emulator.arm64
+.\android-runtime-apk\build_apk.ps1 -Abi x86_64
+.\tools\windows_android_emulator.ps1 -Action Install -Abi x86_64
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s emulator-5580 shell am start -n com.axrb.helloxr.emulator/android.app.NativeActivity
+```
+
+This image does **not** advertise `armeabi-v7a` (32-bit ARM). ARM64 translation
+also does not supply Meta/Oculus APIs, missing OpenXR extensions, or AXRB Vulkan
+swapchains. Inspect each game's ABI and runtime requirements before expecting
+it to work.
+
 ## Verified on this PC
 
 - Windows WHPX, Android Emulator 36.5.11, API 34 Google APIs x86_64 image.
@@ -170,8 +227,8 @@ OpenXR bridge or `--serve-images` receiver. For a sustained transport check:
   `XR_KHR_vulkan_enable` currently does not provide a usable Vulkan swapchain
   implementation. A hardware Vulkan device in Android is necessary but is not
   sufficient to run Vulkan-only OpenXR games.
-- The first compatibility target is the x86_64 GLES `hello_xr` sample. ARM-only
-  APK translation, headset-specific APIs and arbitrary games are not validated.
+- Both x86_64 and translated ARM64 GLES `hello_xr` samples work. 32-bit ARM,
+  headset-specific APIs and arbitrary games are not validated.
 - A future low-latency Windows path needs host-side Gfxstream image access with
   synchronization and OpenXR texture import, or GPU encoding/decoding. A guest
   Vulkan handle cannot simply be passed to the Windows OpenXR compositor.

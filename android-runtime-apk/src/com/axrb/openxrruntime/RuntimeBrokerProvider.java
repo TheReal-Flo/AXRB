@@ -94,9 +94,14 @@ public final class RuntimeBrokerProvider extends ContentProvider {
                 && "active".equals(segments.get(5))) {
             MatrixCursor cursor = new MatrixCursor(ACTIVE_RUNTIME_COLUMNS);
             ApplicationInfo appInfo = getContext().getApplicationInfo();
+            String nativeLibDir = getRuntimeNativeLibDir(appInfo, segments.get(3));
+            if (nativeLibDir == null) {
+                Log.i(TAG, "No installed runtime for ABI " + segments.get(3));
+                return cursor;
+            }
             cursor.addRow(new Object[] {
                 getContext().getPackageName(),
-                getRuntimeNativeLibDir(appInfo, segments.get(3)),
+                nativeLibDir,
                 "libopenxr_runtime.so",
                 0
             });
@@ -157,7 +162,15 @@ public final class RuntimeBrokerProvider extends ContentProvider {
         if (systemDir != null) {
             return systemDir;
         }
-        return appInfo.nativeLibraryDir;
+        // A translated ARM app must never be handed an x86 runtime (or vice versa).
+        String subdir = getSystemRuntimeLibSubdir(abi);
+        if (subdir != null && appInfo.nativeLibraryDir != null) {
+            File nativeDir = new File(appInfo.nativeLibraryDir);
+            if (subdir.equals(nativeDir.getName()) && new File(nativeDir, "libopenxr_runtime.so").isFile()) {
+                return nativeDir.getAbsolutePath();
+            }
+        }
+        return null;
     }
 
     private static String getSystemRuntimeNativeLibDir(ApplicationInfo appInfo, String abi) {

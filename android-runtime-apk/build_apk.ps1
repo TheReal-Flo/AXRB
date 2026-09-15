@@ -12,6 +12,8 @@ $bt = Join-Path $Sdk "build-tools\$BuildToolsVersion"
 $androidJar = Join-Path $Sdk 'platforms\android-29\android.jar'
 $toolchain = Join-Path $Sdk "ndk\$NdkVersion\build\cmake\android.toolchain.cmake"
 $ninja = Join-Path $Sdk 'cmake\3.22.1\bin\ninja.exe'
+# ABI variants replace the same package and must use the same signing identity.
+$keystore = Join-Path $root 'build-android-runtime-windows-x86_64\debug.keystore'
 function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed ($LASTEXITCODE)" }
@@ -39,10 +41,11 @@ try {
     Copy-Item "$build\dex\classes.dex" "$build\package" -Force
     Run "$Jdk\bin\jar.exe" @('uf', "$build\unsigned.apk", '-C', "$build\package", 'classes.dex', '-C', "$build\package", 'lib')
     Run "$bt\zipalign.exe" @('-f', '-p', '4', "$build\unsigned.apk", "$build\aligned.apk")
-    if (!(Test-Path "$build\debug.keystore")) {
-        Run "$Jdk\bin\keytool.exe" @('-genkeypair', '-keystore', "$build\debug.keystore", '-storepass', 'android', '-keypass', 'android', '-alias', 'androiddebugkey', '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000', '-dname', 'CN=Android Debug,O=Android,C=US')
+    if (!(Test-Path $keystore)) {
+        New-Item -ItemType Directory -Force (Split-Path $keystore -Parent) | Out-Null
+        Run "$Jdk\bin\keytool.exe" @('-genkeypair', '-keystore', $keystore, '-storepass', 'android', '-keypass', 'android', '-alias', 'androiddebugkey', '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000', '-dname', 'CN=Android Debug,O=Android,C=US')
     }
-    Run "$bt\apksigner.bat" @('sign', '--ks', "$build\debug.keystore", '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', "$build\axrb-openxr-runtime-debug.apk", "$build\aligned.apk")
+    Run "$bt\apksigner.bat" @('sign', '--ks', $keystore, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--out', "$build\axrb-openxr-runtime-debug.apk", "$build\aligned.apk")
     Run "$bt\apksigner.bat" @('verify', "$build\axrb-openxr-runtime-debug.apk")
     Write-Host "Built $build\axrb-openxr-runtime-debug.apk"
 } finally { $env:JAVA_HOME = $oldJavaHome }
