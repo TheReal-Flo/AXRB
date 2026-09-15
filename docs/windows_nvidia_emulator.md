@@ -49,11 +49,16 @@ verification failure. On hybrid PCs, if the wrong GPU is selected, set the
 emulator's Windows graphics preference to the Nvidia GPU and retry.
 Logs and guest GPU reports go to `build-windows-emulator/`.
 
-Pose uses TCP 38490 with an explicit per-device adb reverse. Images use TCP
-38491 to the emulator's host-loopback alias `10.0.2.2`. The native runtime
-recognizes `ranchu`/`goldfish` hardware and connects directly to Windows,
-avoiding the cross-app Unix socket rejected by stock Android SELinux.
-Android security settings remain enabled. The sample needs INTERNET permission.
+Pose uses a nonblocking native TCP stream to `10.0.2.2:38490`; each lookup drains
+available packets and keeps the newest complete pose. Images use
+`127.0.0.1:38491` inside Android, forwarded to Windows with `adb reverse`.
+Both `Start` and `Install` configure that reverse connection. It is required:
+after restarting ADB, recreate it with
+`adb -s emulator-5580 reverse tcp:38491 tcp:38491`.
+The native runtime recognizes `ranchu`/`goldfish` hardware, avoiding the cross-app
+Unix socket rejected by stock Android SELinux. Android security settings remain
+enabled. The sample needs INTERNET permission. TCP 38490 reverse remains
+configured for older runtime/probe compatibility.
 
 The sample build expects a Khronos OpenXR-SDK-Source checkout under
 `third_party/OpenXR-SDK-Source` (or pass `-Source`). It applies the included
@@ -83,6 +88,52 @@ edits; the build helper preserves those edits.
   SteamVR (512x512 layers=1)`. More than 140 Android frames arrived with no
   logged OpenXR submission errors. The headset wearer confirmed seeing the
   colored cubes, verifying visible output through the complete bridge path.
+
+## Performance follow-up
+
+The headset wearer confirmed motion is **much smoother** after these changes.
+At the same 512x512 RGBA transport resolution on the RTX 5070 Ti:
+
+| Measurement | Original path | Updated path |
+| --- | --- | --- |
+| Android frame delivery to Windows | ~0.9 fps in the profiled baseline | ~120–135 fps uncapped in standby; ~76–90 fps with final pacing and headset active |
+| Pose query, average per call | ~97–99 ms | ~0.03–0.06 ms |
+| Image socket send, average per frame | ~108–117 ms | ~0.7–2.4 ms across runs |
+| GPU readback, average per frame | ~1 ms | ~1 ms |
+
+These are observed five-second wall-clock windows, not a benchmark of arbitrary
+games or end-to-end headset latency. The baseline and uncapped measurements
+included headset standby. SteamVR reports standby transitions in `vrserver.txt`;
+its compositor submission rate must be distinguished from Android delivery.
+With the headset active, the final host submitted approximately 71.1–71.5 fps
+against the 72 Hz target reported by SteamVR. Removing the redundant Windows
+sleep raised host submission from approximately 62–64 fps to that rate.
+
+Changes:
+
+- Replaced per-query blocking ContentProvider pose reads on the emulator with
+  native, nonblocking connect/read and a decoder that retains split TCP records.
+  Native Android networking still applies; no root/security changes are needed.
+- Sent image data through ADB's native emulator connection instead of the slow
+  emulator NAT route. Enabled TCP_NODELAY for pose/image senders and increased
+  the image send buffer.
+- Kept the host pose-publication lock out of the blocking OpenXR frame loop.
+- Paced Android at its advertised 90 Hz period; late frames do not create an
+  unbounded catch-up queue. Removed the redundant Windows sleep from active
+  OpenXR submission. This is not yet refresh-rate negotiation with the headset.
+- Disabled per-entry-point Android logs in Release while retaining GPU, error,
+  transport and aggregate timing diagnostics.
+
+`AXRB.Perf` logs report pose queries, readback, image send and frame rates on
+Android, plus image arrival, OpenXR wait and projection timing on Windows.
+Read them with:
+
+```powershell
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s emulator-5580 logcat -s AXRB.Perf
+```
+
+Four native tests pass, including all possible two-part splits of a pose record,
+coalesced records, reconnect reset, invalid headers and the eye-swapchain test.
 
 To repeat frame inspection without a headset, run `--serve 38490` instead of
 `--serve-openxr`, launch the sample, then run:

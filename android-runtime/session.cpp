@@ -3,6 +3,7 @@
 #include "image_frame.h"
 #include "openxr_dispatch/openxr_minimal.h"
 #include "pose_client.h"
+#include "perf_stats.h"
 
 #include <array>
 #include <chrono>
@@ -13,6 +14,7 @@
 #include <deque>
 #include <string_view>
 #include <vector>
+#include <thread>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -21,6 +23,7 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/time.h>
@@ -107,10 +110,13 @@ SwapchainRecord* g_lastReleasedSwapchain = nullptr;
 uint32_t g_actionCount = 0;
 uint64_t g_nextPath = 1;
 uint64_t g_imageFrameSequence = 0;
+XrTime g_nextFrameStart = 0;
 
 void log_call(const char* name)
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(NDEBUG)
+    (void)name; // Keep release frame loops free of per-entry-point log traffic.
+#elif defined(__ANDROID__)
     __android_log_print(ANDROID_LOG_INFO, "AXRB.Runtime", "%s", name);
 #else
     std::fprintf(stderr, "AXRB.Runtime: %s\n", name);
@@ -437,6 +443,8 @@ public:
         const uint8_t* payload,
         uint64_t payloadSize)
     {
+        static axrb::protocol::PerfStats stats("image-send");
+        axrb::protocol::PerfScope scope(stats);
         if (!ensure_connected()) {
             if (!reportedSendSkip_) {
                 __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "send skipped: no TCP connection");
@@ -481,18 +489,22 @@ private:
         __system_property_get("ro.hardware", hardware);
         if (std::strcmp(hardware, "ranchu") == 0 || std::strcmp(hardware, "goldfish") == 0) {
             // Stock Android SELinux separates the app and broker's Unix sockets.
-            // Use the existing host image protocol directly through emulator NAT.
+            // Use adb reverse's native emulator pipe rather than its slow NAT.
             int candidate = ::socket(AF_INET, SOCK_STREAM, 0);
             if (candidate < 0) { return false; }
+            int noDelay = 1;
+            setsockopt(candidate, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
+            int sendBuffer = 4 * 1024 * 1024;
+            setsockopt(candidate, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
             timeval timeout{3, 0};
             setsockopt(candidate, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
             sockaddr_in address{};
             address.sin_family = AF_INET;
             address.sin_port = htons(38491);
-            inet_pton(AF_INET, "10.0.2.2", &address.sin_addr);
+            inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
             if (::connect(candidate, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
                 socket_ = candidate;
-                __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "connected to Windows host 10.0.2.2:38491");
+                __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "connected to Windows image stream via adb reverse :38491");
                 return true;
             }
             ::close(candidate);
@@ -571,6 +583,7 @@ ImageTransportClient& image_transport_client()
 
 void maybe_send_swapchain_image(const SwapchainRecord& sc)
 {
+    const auto readbackStart = std::chrono::steady_clock::now();
     static bool reportedEntry = false;
     static bool reportedMissingSwapchain = false;
     static bool reportedOversize = false;
@@ -786,6 +799,9 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc)
         reportedReadback = true;
     }
 
+    static axrb::protocol::PerfStats readbackStats("image-readback");
+    readbackStats.record(std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - readbackStart).count());
     if (image_transport_client().send_frame(
             sequence,
             transportWidth,
@@ -833,6 +849,7 @@ XrResult XRAPI_CALL xrCreateInstance_impl(const XrInstanceCreateInfo* createInfo
     }
     g_lastReleasedSwapchain = nullptr;
     g_imageFrameSequence = 0;
+    g_nextFrameStart = 0;
     return XR_SUCCESS;
 }
 
@@ -1918,7 +1935,20 @@ XrResult XRAPI_CALL xrWaitFrame_impl(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    frameState->predictedDisplayTime = monotonic_time_ns() + 11'111'111;
+    // Pace at the period this prototype advertises. Never build a queue of
+    // catch-up frames after a slow render or a disconnected transport.
+    constexpr XrTime period = 11'111'111;
+    XrTime now = monotonic_time_ns();
+    if (g_nextFrameStart == 0 || now - g_nextFrameStart >= period) {
+        g_nextFrameStart = now;
+    }
+    if (g_nextFrameStart > now) {
+        std::this_thread::sleep_for(std::chrono::nanoseconds(g_nextFrameStart - now));
+        now = monotonic_time_ns();
+    }
+    if (now - g_nextFrameStart >= period) { g_nextFrameStart = now; }
+    g_nextFrameStart += period;
+    frameState->predictedDisplayTime = g_nextFrameStart;
     frameState->predictedDisplayPeriod = 11'111'111;
     frameState->shouldRender = 1;
     return XR_SUCCESS;
@@ -1941,6 +1971,8 @@ XrResult XRAPI_CALL xrBeginFrame_impl(XrSession session, const XrFrameBeginInfo*
 
 XrResult XRAPI_CALL xrEndFrame_impl(XrSession session, const XrFrameEndInfo* frameEndInfo)
 {
+    static axrb::protocol::PerfStats stats("end-frame");
+    axrb::protocol::PerfScope scope(stats);
     log_call("xrEndFrame");
     if (!is_valid_session(session)) {
         return XR_ERROR_HANDLE_INVALID;

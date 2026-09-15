@@ -73,13 +73,15 @@ switch ($Action) {
             throw
         }
         Run $adb @('-s', $serial, 'reverse', 'tcp:38490', 'tcp:38490')
-        Write-Host "Ready: $serial. Images use 10.0.2.2:38491 (TCP); pose uses adb reverse."
+        Run $adb @('-s', $serial, 'reverse', 'tcp:38491', 'tcp:38491')
+        Write-Host "Ready: $serial. Images use adb reverse :38491; native pose stream uses 10.0.2.2:38490."
     }
     Verify { Verify-Gpu }
     Install {
         Verify-Gpu
         Run $adb @('-s', $serial, 'install', '-r', $RuntimeApk)
         Run $adb @('-s', $serial, 'reverse', 'tcp:38490', 'tcp:38490')
+        Run $adb @('-s', $serial, 'reverse', 'tcp:38491', 'tcp:38491')
         if ($AppApk) { Run $adb @('-s', $serial, 'install', '-r', $AppApk) }
     }
     Stop { Run $adb @('-s', $serial, 'emu', 'kill') }

@@ -1,4 +1,5 @@
 #include "openxr_host.h"
+#include "perf_stats.h"
 
 #include "gpu_transport.h"
 #include "image_transport.h"
@@ -276,6 +277,8 @@ private:
 struct HostImageFrame {
     void store(const axrb::protocol::ImageFrameHeader& newHeader, std::vector<uint8_t>&& newPixels)
     {
+        static axrb::protocol::PerfStats stats("host-image-arrival");
+        stats.record(0);
         std::lock_guard<std::mutex> lock(mutex);
         header = newHeader;
         pixels = std::make_shared<std::vector<uint8_t>>(std::move(newPixels));
@@ -443,15 +446,14 @@ public:
 
     axrb::protocol::PoseFrame make_frame(uint64_t sequence)
     {
-        std::lock_guard<std::mutex> lock(frameMutex_);
         pump_events();
 
-        axrb::protocol::PoseFrame frame = latest_;
+        axrb::protocol::PoseFrame frame = latest_frame(sequence);
         frame.sequence = sequence;
         frame.monotonic_time_ns = monotonic_time_ns();
 
         if (!sessionRunning_) {
-            latest_ = frame;
+            publish_pose(frame);
             return frame;
         }
 
@@ -462,7 +464,12 @@ public:
         if (useFrameLoop_) {
             XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
             XrFrameState frameState{XR_TYPE_FRAME_STATE};
-            XrResult result = waitFrame_(session_, &waitInfo, &frameState);
+            XrResult result;
+            {
+                static axrb::protocol::PerfStats stats("host-wait-frame");
+                axrb::protocol::PerfScope scope(stats);
+                result = waitFrame_(session_, &waitInfo, &frameState);
+            }
             if (result == XR_SUCCESS) {
                 frameDisplayTime = frameState.predictedDisplayTime;
                 locateTime = frameState.predictedDisplayTime;
@@ -478,11 +485,11 @@ public:
                     useFrameLoop_ = false;
                 } else {
                     std::fprintf(stderr, "AXRB OpenXR: xrBeginFrame failed: %s (%d)\n", xr_result_name(result), result);
-                    latest_ = frame;
+                    publish_pose(frame);
                     return frame;
                 }
             } else if (result == XR_FRAME_DISCARDED) {
-                latest_ = frame;
+                publish_pose(frame);
                 return frame;
             } else {
                 std::fprintf(stderr, "AXRB OpenXR: xrWaitFrame failed: %s (%d)\n", xr_result_name(result), result);
@@ -494,7 +501,7 @@ public:
             locateTime = current_xr_time();
         }
         if (locateTime == 0) {
-            latest_ = frame;
+            publish_pose(frame);
             return frame;
         }
 
@@ -504,7 +511,6 @@ public:
             (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
             (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
             frame.hmd = to_protocol_pose(location.pose);
-            latest_ = frame;
             if (sequence % 90 == 0) {
                 std::fprintf(
                     stderr,
@@ -517,6 +523,7 @@ public:
         }
 
         locate_controller_spaces(frame, locateTime, sequence);
+        publish_pose(frame);
 
         if (beganFrame) {
             std::array<XrCompositionLayerProjectionView, 2> projectionViews{};
@@ -543,7 +550,7 @@ public:
             }
         }
 
-        return latest_;
+        return frame;
     }
 
     axrb::protocol::PoseFrame latest_frame(uint64_t sequence)
@@ -555,7 +562,15 @@ public:
         return frame;
     }
 
+    bool drives_frame_loop() const { return sessionRunning_ && useFrameLoop_; }
+
 private:
+    void publish_pose(const axrb::protocol::PoseFrame& frame)
+    {
+        std::lock_guard<std::mutex> lock(frameMutex_);
+        latest_ = frame;
+    }
+
     template <typename T>
     bool load_func(const char* name, T* out)
     {
@@ -806,6 +821,8 @@ private:
         std::array<XrCompositionLayerProjectionView, 2>& projectionViews,
         XrCompositionLayerProjection& projectionLayer)
     {
+        static axrb::protocol::PerfStats stats("host-projection");
+        axrb::protocol::PerfScope scope(stats);
         uint32_t imageIndex = 0;
         XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         XrResult result = acquireSwapchainImage_(projectionSwapchain_, &acquireInfo, &imageIndex);
@@ -1178,7 +1195,6 @@ private:
         }
 
         if (locatedAny) {
-            latest_ = frame;
             if (sequence % 90 == 0) {
                 std::fprintf(
                     stderr,
@@ -1208,6 +1224,7 @@ private:
 
     void handle_session_state(XrSessionState state)
     {
+        std::fprintf(stderr, "AXRB OpenXR: session state=%d\n", static_cast<int>(state));
         if (state == XR_SESSION_STATE_READY && !sessionRunning_) {
             XrSessionBeginInfo beginInfo{XR_TYPE_SESSION_BEGIN_INFO};
             beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -1521,7 +1538,11 @@ int OpenXrHost::run(int argc, char** argv)
         uint64_t sequence = 0;
         while (frames == 0 || sequence < frames) {
             poseSource.make_frame(sequence++);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // OpenXR paces an active frame loop. An extra Windows sleep can
+            // consume a timer tick and lower the compositor submission rate.
+            if (!poseSource.drives_frame_loop()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
         }
         return 0;
    }

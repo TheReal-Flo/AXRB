@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pose_frame.h"
+#include "pose_stream_decoder.h"
 
 #if defined(__ANDROID__)
 #include <jni.h>
@@ -18,6 +19,7 @@ public:
 private:
     bool query_pose_broker();
     bool ensure_connected();
+    bool ensure_emulator_connected();
     void read_available_frames();
     void close_socket();
 
@@ -27,6 +29,9 @@ private:
     uint32_t broker_retry_countdown_ = 0;
 #endif
     int socket_ = -1;
+    bool connecting_ = false;
+    uint64_t next_connect_ns_ = 0;
+    axrb::protocol::PoseStreamDecoder decoder_;
     uint32_t retry_countdown_ = 0;
     axrb::protocol::PoseFrame latest_{
         axrb::protocol::kPoseFrameMagic,

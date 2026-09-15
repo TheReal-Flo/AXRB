@@ -22,3 +22,7 @@ target_link_libraries(axrb_video_transport_smoke PRIVATE axrb_protocol)
 add_test(NAME axrb_video_transport_reassembles_udp_frames COMMAND axrb_video_transport_smoke)
 
 add_subdirectory(hello_xr)
+
+add_executable(axrb_pose_stream_decoder_smoke pose_stream_decoder_smoke.cpp)
+target_link_libraries(axrb_pose_stream_decoder_smoke PRIVATE axrb_protocol)
+add_test(NAME axrb_pose_stream_handles_fragmentation COMMAND axrb_pose_stream_decoder_smoke)

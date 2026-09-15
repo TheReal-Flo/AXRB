@@ -18,6 +18,7 @@ constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
 #include <arpa/inet.h>
 #include <cerrno>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 using SocketHandle = int;
@@ -165,6 +166,8 @@ int TcpPoseServer::serve_with_producer(
         }
 
         std::fprintf(stderr, "AXRB TCP: client connected\n");
+        int noDelay = 1;
+        setsockopt(client, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
         while (maxFrames == 0 || sequence < maxFrames) {
             const PoseFrame frame = producer(sequence);
             if (!send_all(client, &frame, sizeof(frame))) {

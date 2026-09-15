@@ -1,8 +1,10 @@
 #include "pose_client.h"
+#include "perf_stats.h"
 
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <chrono>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -16,6 +18,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 #endif
 
@@ -32,13 +35,6 @@ void log_pose_client(const char* message)
 #else
     std::fprintf(stderr, "AXRB.PoseClient: %s\n", message);
 #endif
-}
-
-bool is_valid_frame(const axrb::protocol::PoseFrame& frame)
-{
-    return frame.magic == axrb::protocol::kPoseFrameMagic &&
-        frame.version == axrb::protocol::kPoseFrameVersion &&
-        frame.type == axrb::protocol::kPoseFrameType;
 }
 
 #if defined(__ANDROID__)
@@ -79,6 +75,19 @@ void log_connect_failure(const char* host, int error)
 
 const axrb::protocol::PoseFrame& PoseClient::latest_pose_frame()
 {
+    static axrb::protocol::PerfStats stats("pose-query");
+    axrb::protocol::PerfScope scope(stats);
+#if defined(__ANDROID__)
+    static const bool emulator = [] {
+        char hardware[PROP_VALUE_MAX]{};
+        __system_property_get("ro.hardware", hardware);
+        return std::strcmp(hardware, "ranchu") == 0 || std::strcmp(hardware, "goldfish") == 0;
+    }();
+    if (emulator) {
+        if (ensure_emulator_connected()) { read_available_frames(); }
+        return latest_;
+    }
+#endif
     if (query_pose_broker()) {
         return latest_;
     }
@@ -275,44 +284,72 @@ bool PoseClient::ensure_connected()
 #endif
 }
 
+bool PoseClient::ensure_emulator_connected()
+{
+#if !defined(__ANDROID__)
+    return false;
+#else
+    const auto now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (socket_ >= 0) {
+        if (!connecting_) { return true; }
+        pollfd descriptor{socket_, POLLOUT, 0};
+        const int ready = poll(&descriptor, 1, 0);
+        if (ready < 0 && errno == EINTR) { return false; }
+        if (ready == 0 && now < next_connect_ns_) { return false; }
+        int error = 0;
+        socklen_t length = sizeof(error);
+        if (ready > 0 && getsockopt(socket_, SOL_SOCKET, SO_ERROR, &error, &length) == 0 && error == 0) {
+            connecting_ = false;
+            log_pose_client("nonblocking emulator pose stream connected");
+            return true;
+        }
+        close_socket();
+        next_connect_ns_ = now + 1'000'000'000;
+        return false;
+    }
+    if (now < next_connect_ns_) { return false; }
+    next_connect_ns_ = now + 1'000'000'000;
+    socket_ = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (socket_ < 0) { return false; }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(kDefaultBridgePort);
+    inet_pton(AF_INET, "10.0.2.2", &address.sin_addr);
+    if (connect(socket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) { return true; }
+    if (errno == EINPROGRESS) { connecting_ = true; return false; }
+    close_socket();
+    return false;
+#endif
+}
+
 void PoseClient::read_available_frames()
 {
 #if !defined(__ANDROID__)
     return;
 #else
-    axrb::protocol::PoseFrame frame{};
-    while (true) {
-        char* cursor = reinterpret_cast<char*>(&frame);
-        size_t remaining = sizeof(frame);
-        while (remaining > 0) {
-            const ssize_t received = recv(socket_, cursor, remaining, 0);
-            if (received > 0) {
-                cursor += received;
-                remaining -= static_cast<size_t>(received);
-                continue;
-            }
-            if (received == 0) {
-                close_socket();
-                log_pose_client("host bridge disconnected");
-                return;
-            }
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return;
-            }
-            close_socket();
-            log_pose_client("host bridge recv failed");
+    unsigned char bytes[4096];
+    // Bound the drain even if the producer is continuously writing.
+    for (int batch = 0; batch < 64; ++batch) {
+        const ssize_t received = recv(socket_, bytes, sizeof(bytes), MSG_DONTWAIT);
+        if (received > 0) {
+            if (decoder_.append(bytes, static_cast<size_t>(received), latest_)) { continue; }
+            log_pose_client("invalid pose record");
+        } else if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return;
+        } else if (received < 0 && errno == EINTR) {
+            continue;
         }
-
-        if (is_valid_frame(frame)) {
-            latest_ = frame;
-        }
+        close_socket();
+        return;
     }
 #endif
 }
 
 void PoseClient::close_socket()
 {
+    connecting_ = false;
+    decoder_.reset();
 #if defined(__ANDROID__)
     if (socket_ >= 0) {
         close(socket_);
