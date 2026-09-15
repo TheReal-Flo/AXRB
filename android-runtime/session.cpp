@@ -25,6 +25,7 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 #endif
 
@@ -52,7 +53,6 @@ struct RuntimeHandle {
 RuntimeHandle g_instanceHandle{0xAABBCCDD00000001ULL};
 RuntimeHandle g_sessionHandle{0xAABBCCDD00000002ULL};
 RuntimeHandle g_spaceHandle{0xAABBCCDD00000003ULL};
-RuntimeHandle g_swapchainHandle{0xAABBCCDD00000004ULL};
 RuntimeHandle g_actionSetHandle{0xAABBCCDD00000005ULL};
 RuntimeHandle g_actionHandles[8] = {
     {0xAABBCCDD00000100ULL},
@@ -89,17 +89,21 @@ std::array<SpaceRecord, 16> g_spaces{};
 uint32_t g_spaceCount = 0;
 std::array<PathRecord, 64> g_paths{};
 uint32_t g_pathCount = 0;
-bool g_swapchainCreated = false;
-bool g_swapchainImageAcquired = false;
-bool g_swapchainImageWaited = false;
-uint32_t g_nextSwapchainImage = 0;
-uint32_t g_swapchainWidth = 0;
-uint32_t g_swapchainHeight = 0;
-uint32_t g_swapchainArraySize = 0;
-int64_t g_swapchainFormat = 0;
-uint32_t g_glSwapchainTextures[3] = {};
-uint32_t g_currentSwapchainImage = 0;
-uint32_t g_lastReleasedSwapchainImage = 0;
+struct SwapchainRecord {
+    bool created = false;
+    bool acquired = false;
+    bool waited = false;
+    uint32_t nextImage = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t arraySize = 0;
+    int64_t format = 0;
+    uint32_t textures[3] = {};
+    uint32_t currentImage = 0;
+    uint32_t releasedImage = 0;
+};
+std::array<SwapchainRecord, 16> g_swapchains{};
+SwapchainRecord* g_lastReleasedSwapchain = nullptr;
 uint32_t g_actionCount = 0;
 uint64_t g_nextPath = 1;
 uint64_t g_imageFrameSequence = 0;
@@ -174,11 +178,6 @@ SpaceRecord* find_space(XrSpace space)
     return nullptr;
 }
 
-XrSwapchain fake_swapchain()
-{
-    return reinterpret_cast<XrSwapchain>(&g_swapchainHandle);
-}
-
 XrActionSet fake_action_set()
 {
     return reinterpret_cast<XrActionSet>(&g_actionSetHandle);
@@ -199,9 +198,12 @@ bool is_valid_session(XrSession session)
     return session == fake_session();
 }
 
-bool is_valid_swapchain(XrSwapchain swapchain)
+SwapchainRecord* find_swapchain(XrSwapchain handle)
 {
-    return g_swapchainCreated && swapchain == fake_swapchain();
+    for (auto& record : g_swapchains) {
+        if (record.created && handle == reinterpret_cast<XrSwapchain>(&record)) { return &record; }
+    }
+    return nullptr;
 }
 
 bool is_valid_action_set(XrActionSet actionSet)
@@ -362,31 +364,36 @@ void queue_session_state(XrSessionState state)
     g_pendingSessionEvents.push_back(state);
 }
 
-void destroy_swapchain_images()
+void destroy_swapchain_images(SwapchainRecord& sc)
 {
 #if defined(__ANDROID__)
-    if (g_glSwapchainTextures[0] != 0 || g_glSwapchainTextures[1] != 0 || g_glSwapchainTextures[2] != 0) {
-        glDeleteTextures(3, g_glSwapchainTextures);
+    if (sc.textures[0] != 0 || sc.textures[1] != 0 || sc.textures[2] != 0) {
+        glDeleteTextures(3, sc.textures);
     }
 #endif
-    g_glSwapchainTextures[0] = 0;
-    g_glSwapchainTextures[1] = 0;
-    g_glSwapchainTextures[2] = 0;
+    sc.textures[0] = 0;
+    sc.textures[1] = 0;
+    sc.textures[2] = 0;
 }
 
-void create_opengles_swapchain_images(const XrSwapchainCreateInfo& createInfo)
+void create_opengles_swapchain_images(SwapchainRecord& sc, const XrSwapchainCreateInfo& createInfo)
 {
-    destroy_swapchain_images();
+    destroy_swapchain_images(sc);
 #if defined(__ANDROID__)
+    const auto* renderer = glGetString(GL_RENDERER);
+    const auto* vendor = glGetString(GL_VENDOR);
+    __android_log_print(ANDROID_LOG_INFO, "AXRB.GPU", "swapchain GLES vendor=%s renderer=%s",
+                        vendor ? reinterpret_cast<const char*>(vendor) : "unknown",
+                        renderer ? reinterpret_cast<const char*>(renderer) : "unknown");
     GLenum internalFormat = static_cast<GLenum>(createInfo.format);
     if (internalFormat != GL_RGBA8 && internalFormat != GL_SRGB8_ALPHA8) {
         internalFormat = GL_RGBA8;
     }
 
     const GLenum target = createInfo.arraySize > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
-    glGenTextures(3, g_glSwapchainTextures);
+    glGenTextures(3, sc.textures);
     for (uint32_t i = 0; i < 3; ++i) {
-        glBindTexture(target, g_glSwapchainTextures[i]);
+        glBindTexture(target, sc.textures[i]);
         glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -470,6 +477,28 @@ private:
         }
         lastConnectAttemptNs_ = now;
 
+        char hardware[PROP_VALUE_MAX]{};
+        __system_property_get("ro.hardware", hardware);
+        if (std::strcmp(hardware, "ranchu") == 0 || std::strcmp(hardware, "goldfish") == 0) {
+            // Stock Android SELinux separates the app and broker's Unix sockets.
+            // Use the existing host image protocol directly through emulator NAT.
+            int candidate = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (candidate < 0) { return false; }
+            timeval timeout{3, 0};
+            setsockopt(candidate, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_port = htons(38491);
+            inet_pton(AF_INET, "10.0.2.2", &address.sin_addr);
+            if (::connect(candidate, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
+                socket_ = candidate;
+                __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "connected to Windows host 10.0.2.2:38491");
+                return true;
+            }
+            ::close(candidate);
+            return false;
+        }
+
         int candidate = ::socket(AF_UNIX, SOCK_STREAM, 0);
         if (candidate < 0) {
             lastError_ = errno;
@@ -507,8 +536,9 @@ private:
         const uint8_t* cursor = static_cast<const uint8_t*>(data);
         size_t remaining = size;
         while (remaining > 0) {
-            const ssize_t sent = ::send(socket_, cursor, remaining, 0);
+            const ssize_t sent = ::send(socket_, cursor, remaining, MSG_NOSIGNAL);
             if (sent <= 0) {
+                if (sent < 0 && errno == EINTR) { continue; }
                 return false;
             }
             cursor += sent;
@@ -539,7 +569,7 @@ ImageTransportClient& image_transport_client()
     return client;
 }
 
-void maybe_send_swapchain_image()
+void maybe_send_swapchain_image(const SwapchainRecord& sc)
 {
     static bool reportedEntry = false;
     static bool reportedMissingSwapchain = false;
@@ -551,14 +581,14 @@ void maybe_send_swapchain_image()
         __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "image transport hook entered");
         reportedEntry = true;
     }
-    if (!g_swapchainCreated || g_swapchainWidth == 0 || g_swapchainHeight == 0 || g_swapchainArraySize == 0) {
+    if (!sc.created || sc.width == 0 || sc.height == 0 || sc.arraySize == 0) {
         if (!reportedMissingSwapchain) {
             __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "skip: no swapchain image available");
             reportedMissingSwapchain = true;
         }
         return;
     }
-    if (g_glSwapchainTextures[g_lastReleasedSwapchainImage] == 0) {
+    if (sc.textures[sc.releasedImage] == 0) {
         if (!reportedMissingSwapchain) {
             __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "skip: swapchain texture is zero");
             reportedMissingSwapchain = true;
@@ -567,15 +597,15 @@ void maybe_send_swapchain_image()
     }
 
     const uint64_t sequence = g_imageFrameSequence++;
-    if (g_swapchainWidth > 4096 || g_swapchainHeight > 4096 || g_swapchainArraySize > 4) {
+    if (sc.width > 4096 || sc.height > 4096 || sc.arraySize > 4) {
         if (!reportedOversize) {
             __android_log_print(
                 ANDROID_LOG_INFO,
                 "AXRB.Image",
                 "skip: oversized image %ux%u layers=%u",
-                g_swapchainWidth,
-                g_swapchainHeight,
-                g_swapchainArraySize);
+                sc.width,
+                sc.height,
+                sc.arraySize);
             reportedOversize = true;
         }
         return;
@@ -583,11 +613,11 @@ void maybe_send_swapchain_image()
 
     constexpr uint32_t kMaxTransportDimension = 512;
     const uint32_t transportWidth =
-        g_swapchainWidth > kMaxTransportDimension ? kMaxTransportDimension : g_swapchainWidth;
+        sc.width > kMaxTransportDimension ? kMaxTransportDimension : sc.width;
     const uint32_t transportHeight =
-        g_swapchainHeight > kMaxTransportDimension ? kMaxTransportDimension : g_swapchainHeight;
+        sc.height > kMaxTransportDimension ? kMaxTransportDimension : sc.height;
     const uint64_t layerBytes = static_cast<uint64_t>(transportWidth) * transportHeight * 4;
-    const uint64_t payloadBytes = layerBytes * g_swapchainArraySize;
+    const uint64_t payloadBytes = layerBytes * sc.arraySize;
     if (payloadBytes > 128ull * 1024ull * 1024ull) {
         return;
     }
@@ -650,15 +680,15 @@ void maybe_send_swapchain_image()
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
 
     bool ok = true;
-    for (uint32_t layer = 0; layer < g_swapchainArraySize; ++layer) {
+    for (uint32_t layer = 0; layer < sc.arraySize; ++layer) {
         while (glGetError() != GL_NO_ERROR) {
         }
         glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFramebuffer);
-        if (g_swapchainArraySize > 1) {
+        if (sc.arraySize > 1) {
             glFramebufferTextureLayer(
                 GL_READ_FRAMEBUFFER,
                 GL_COLOR_ATTACHMENT0,
-                g_glSwapchainTextures[g_lastReleasedSwapchainImage],
+                sc.textures[sc.releasedImage],
                 0,
                 static_cast<GLint>(layer));
         } else {
@@ -666,7 +696,7 @@ void maybe_send_swapchain_image()
                 GL_READ_FRAMEBUFFER,
                 GL_COLOR_ATTACHMENT0,
                 GL_TEXTURE_2D,
-                g_glSwapchainTextures[g_lastReleasedSwapchainImage],
+                sc.textures[sc.releasedImage],
                 0);
         }
 
@@ -676,7 +706,7 @@ void maybe_send_swapchain_image()
                     ANDROID_LOG_INFO,
                     "AXRB.Image",
                     "skip: framebuffer incomplete for tex=%u layer=%u status=0x%x",
-                    g_glSwapchainTextures[g_lastReleasedSwapchainImage],
+                    sc.textures[sc.releasedImage],
                     layer,
                     glCheckFramebufferStatus(GL_READ_FRAMEBUFFER));
                 reportedFramebufferFailure = true;
@@ -699,8 +729,8 @@ void maybe_send_swapchain_image()
         glBlitFramebuffer(
             0,
             0,
-            static_cast<GLint>(g_swapchainWidth),
-            static_cast<GLint>(g_swapchainHeight),
+            static_cast<GLint>(sc.width),
+            static_cast<GLint>(sc.height),
             0,
             0,
             static_cast<GLint>(transportWidth),
@@ -724,7 +754,7 @@ void maybe_send_swapchain_image()
                     "AXRB.Image",
                     "skip: glReadPixels failed err=0x%x tex=%u layer=%u size=%ux%u",
                     readError,
-                    g_glSwapchainTextures[g_lastReleasedSwapchainImage],
+                    sc.textures[sc.releasedImage],
                     layer,
                     transportWidth,
                     transportHeight);
@@ -751,7 +781,7 @@ void maybe_send_swapchain_image()
             static_cast<unsigned long long>(sequence),
             transportWidth,
             transportHeight,
-            g_swapchainArraySize,
+            sc.arraySize,
             static_cast<unsigned long long>(payloadBytes));
         reportedReadback = true;
     }
@@ -760,7 +790,7 @@ void maybe_send_swapchain_image()
             sequence,
             transportWidth,
             transportHeight,
-            g_swapchainArraySize,
+            sc.arraySize,
             payload.data(),
             payloadBytes) && sequence % 150 == 0) {
         __android_log_print(
@@ -770,12 +800,12 @@ void maybe_send_swapchain_image()
             static_cast<unsigned long long>(sequence),
             transportWidth,
             transportHeight,
-            g_swapchainArraySize,
+            sc.arraySize,
             static_cast<unsigned long long>(payloadBytes));
     }
 }
 #else
-void maybe_send_swapchain_image() {}
+void maybe_send_swapchain_image(const SwapchainRecord&) {}
 #endif
 
 XrResult XRAPI_CALL xrCreateInstance_impl(const XrInstanceCreateInfo* createInfo, XrInstance* instance)
@@ -797,11 +827,11 @@ XrResult XRAPI_CALL xrCreateInstance_impl(const XrInstanceCreateInfo* createInfo
     g_spaceCount = 0;
     g_pathCount = 0;
     g_nextPath = 1;
-    g_swapchainCreated = false;
-    g_swapchainImageAcquired = false;
-    g_swapchainImageWaited = false;
-    destroy_swapchain_images();
-    g_nextSwapchainImage = 0;
+    for (auto& sc : g_swapchains) {
+        destroy_swapchain_images(sc);
+        sc = {};
+    }
+    g_lastReleasedSwapchain = nullptr;
     g_imageFrameSequence = 0;
     return XR_SUCCESS;
 }
@@ -1009,10 +1039,11 @@ XrResult XRAPI_CALL xrDestroySession_impl(XrSession session)
     }
     g_sessionState = XR_SESSION_STATE_UNKNOWN;
     g_pendingSessionEvents.clear();
-    g_swapchainCreated = false;
-    g_swapchainImageAcquired = false;
-    g_swapchainImageWaited = false;
-    destroy_swapchain_images();
+    for (auto& sc : g_swapchains) {
+        destroy_swapchain_images(sc);
+        sc = {};
+    }
+    g_lastReleasedSwapchain = nullptr;
     return XR_SUCCESS;
 }
 
@@ -1209,31 +1240,39 @@ XrResult XRAPI_CALL xrCreateSwapchain_impl(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    g_swapchainCreated = true;
-    g_swapchainImageAcquired = false;
-    g_swapchainImageWaited = false;
-    g_nextSwapchainImage = 0;
-    g_currentSwapchainImage = 0;
-    g_lastReleasedSwapchainImage = 0;
-    g_swapchainWidth = createInfo->width;
-    g_swapchainHeight = createInfo->height;
-    g_swapchainArraySize = createInfo->arraySize;
-    g_swapchainFormat = createInfo->format;
-    create_opengles_swapchain_images(*createInfo);
-    *swapchain = fake_swapchain();
+    SwapchainRecord* available = nullptr;
+    for (auto& record : g_swapchains) {
+        if (!record.created) { available = &record; break; }
+    }
+    if (!available) { return XR_ERROR_RUNTIME_FAILURE; }
+    auto& sc = *available;
+    sc = {};
+    sc.created = true;
+    sc.acquired = false;
+    sc.waited = false;
+    sc.nextImage = 0;
+    sc.currentImage = 0;
+    sc.releasedImage = 0;
+    sc.width = createInfo->width;
+    sc.height = createInfo->height;
+    sc.arraySize = createInfo->arraySize;
+    sc.format = createInfo->format;
+    create_opengles_swapchain_images(sc, *createInfo);
+    *swapchain = reinterpret_cast<XrSwapchain>(&sc);
     return XR_SUCCESS;
 }
 
 XrResult XRAPI_CALL xrDestroySwapchain_impl(XrSwapchain swapchain)
 {
     log_call("xrDestroySwapchain");
-    if (!is_valid_swapchain(swapchain)) {
-        return XR_ERROR_HANDLE_INVALID;
-    }
-    g_swapchainCreated = false;
-    g_swapchainImageAcquired = false;
-    g_swapchainImageWaited = false;
-    destroy_swapchain_images();
+    auto* record = find_swapchain(swapchain);
+    if (!record) { return XR_ERROR_HANDLE_INVALID; }
+    auto& sc = *record;
+    if (g_lastReleasedSwapchain == &sc) { g_lastReleasedSwapchain = nullptr; }
+    sc.created = false;
+    sc.acquired = false;
+    sc.waited = false;
+    destroy_swapchain_images(sc);
     return XR_SUCCESS;
 }
 
@@ -1244,9 +1283,9 @@ XrResult XRAPI_CALL xrEnumerateSwapchainImages_impl(
     XrSwapchainImageBaseHeader* images)
 {
     log_call("xrEnumerateSwapchainImages");
-    if (!is_valid_swapchain(swapchain)) {
-        return XR_ERROR_HANDLE_INVALID;
-    }
+    auto* record = find_swapchain(swapchain);
+    if (!record) { return XR_ERROR_HANDLE_INVALID; }
+    auto& sc = *record;
     if (imageCountOutput == nullptr) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -1260,7 +1299,7 @@ XrResult XRAPI_CALL xrEnumerateSwapchainImages_impl(
                 if (glImages[i].type != XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR) {
                     return XR_ERROR_VALIDATION_FAILURE;
                 }
-                glImages[i].image = g_glSwapchainTextures[i];
+                glImages[i].image = sc.textures[i];
             }
         } else if (images[0].type == XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR) {
             auto* vkImages = reinterpret_cast<XrSwapchainImageVulkanKHR*>(images);
@@ -1283,21 +1322,21 @@ XrResult XRAPI_CALL xrAcquireSwapchainImage_impl(
     uint32_t* index)
 {
     log_call("xrAcquireSwapchainImage");
-    if (!is_valid_swapchain(swapchain)) {
-        return XR_ERROR_HANDLE_INVALID;
-    }
+    auto* record = find_swapchain(swapchain);
+    if (!record) { return XR_ERROR_HANDLE_INVALID; }
+    auto& sc = *record;
     if (acquireInfo == nullptr || index == nullptr || acquireInfo->type != XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    if (g_swapchainImageAcquired) {
+    if (sc.acquired) {
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
-    *index = g_nextSwapchainImage;
-    g_currentSwapchainImage = *index;
-    g_nextSwapchainImage = (g_nextSwapchainImage + 1) % 3;
-    g_swapchainImageAcquired = true;
-    g_swapchainImageWaited = false;
+    *index = sc.nextImage;
+    sc.currentImage = *index;
+    sc.nextImage = (sc.nextImage + 1) % 3;
+    sc.acquired = true;
+    sc.waited = false;
     return XR_SUCCESS;
 }
 
@@ -1306,17 +1345,17 @@ XrResult XRAPI_CALL xrWaitSwapchainImage_impl(
     const XrSwapchainImageWaitInfo* waitInfo)
 {
     log_call("xrWaitSwapchainImage");
-    if (!is_valid_swapchain(swapchain)) {
-        return XR_ERROR_HANDLE_INVALID;
-    }
+    auto* record = find_swapchain(swapchain);
+    if (!record) { return XR_ERROR_HANDLE_INVALID; }
+    auto& sc = *record;
     if (waitInfo == nullptr || waitInfo->type != XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    if (!g_swapchainImageAcquired) {
+    if (!sc.acquired) {
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
-    g_swapchainImageWaited = true;
+    sc.waited = true;
     return XR_SUCCESS;
 }
 
@@ -1325,19 +1364,20 @@ XrResult XRAPI_CALL xrReleaseSwapchainImage_impl(
     const XrSwapchainImageReleaseInfo* releaseInfo)
 {
     log_call("xrReleaseSwapchainImage");
-    if (!is_valid_swapchain(swapchain)) {
-        return XR_ERROR_HANDLE_INVALID;
-    }
+    auto* record = find_swapchain(swapchain);
+    if (!record) { return XR_ERROR_HANDLE_INVALID; }
+    auto& sc = *record;
     if (releaseInfo == nullptr || releaseInfo->type != XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    if (!g_swapchainImageAcquired || !g_swapchainImageWaited) {
+    if (!sc.acquired || !sc.waited) {
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
-    g_swapchainImageAcquired = false;
-    g_swapchainImageWaited = false;
-    g_lastReleasedSwapchainImage = g_currentSwapchainImage;
+    sc.acquired = false;
+    sc.waited = false;
+    sc.releasedImage = sc.currentImage;
+    g_lastReleasedSwapchain = &sc;
     return XR_SUCCESS;
 }
 
@@ -1908,7 +1948,7 @@ XrResult XRAPI_CALL xrEndFrame_impl(XrSession session, const XrFrameEndInfo* fra
     if (frameEndInfo == nullptr || frameEndInfo->type != XR_TYPE_FRAME_END_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    maybe_send_swapchain_image();
+    if (g_lastReleasedSwapchain) { maybe_send_swapchain_image(*g_lastReleasedSwapchain); }
     if (g_sessionState != XR_SESSION_STATE_FOCUSED) {
         return XR_ERROR_SESSION_NOT_RUNNING;
     }

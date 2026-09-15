@@ -6,6 +6,14 @@ AXRB is an experimental bridge for running Android OpenXR applications inside a 
 
 The current prototype proves the loader/runtime integration path and a basic CPU frame transport path. It is not production-ready and it is not a 90 FPS renderer yet.
 
+## Native Windows / Nvidia branch
+
+An experimental Android Emulator / Gfxstream path uses native Windows host GPU
+rendering, with no WSL. PowerShell build, launch and GPU-verification scripts
+are described in [Windows Nvidia setup](docs/windows_nvidia_emulator.md).
+The existing GLES frame transport still uses CPU readback; OpenXR Vulkan
+swapchains and arbitrary game compatibility remain unfinished.
+
 ## Goal
 
 ```text

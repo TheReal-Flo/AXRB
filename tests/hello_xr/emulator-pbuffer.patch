@@ -1,0 +1,64 @@
+diff --git a/src/common/gfxwrapper_opengl.c b/src/common/gfxwrapper_opengl.c
+index 6a9f49a..11fd3ce 100644
+--- a/src/common/gfxwrapper_opengl.c
++++ b/src/common/gfxwrapper_opengl.c
+@@ -873,9 +873,15 @@ void ksGpuContext_Destroy(ksGpuContext *context) {
+     context->cglContext = nil;
+ #elif defined(OS_ANDROID) || defined(OS_LINUX_WAYLAND)
+     if (context->ctx != EGL_NO_CONTEXT) {
++        EGL(eglMakeCurrent(context->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT));
+         EGL(eglDestroyContext(context->dpy, context->ctx));
+     }
+ 
++    if (context->fallbackSurface != EGL_NO_SURFACE) {
++        EGL(eglDestroySurface(context->dpy, context->fallbackSurface));
++        context->fallbackSurface = EGL_NO_SURFACE;
++    }
++
+     if (context->dpy != EGL_NO_DISPLAY) {
+         EGL(eglTerminate(context->dpy));
+     }
+@@ -903,7 +909,7 @@ void ksGpuContext_SetCurrent(ksGpuContext *context) {
+ #elif defined(OS_APPLE_MACOS)
+     CGLSetCurrentContext(context->cglContext);
+ #elif defined(OS_ANDROID) || defined(OS_LINUX_WAYLAND)
+-    EGL(eglMakeCurrent(context->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, context->ctx));
++    EGL(eglMakeCurrent(context->dpy, context->fallbackSurface, context->fallbackSurface, context->ctx));
+ #else
+     UNUSED_PARM(context);
+ #endif
+@@ -2632,7 +2638,7 @@ static bool ksGpuContext_CreateForSurfaceEGL(ksGpuContext *context, const ksGpuD
+ 
+     // clang-format off
+     const EGLint configAttribs[] = {
+-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
++        EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
+         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+         EGL_RED_SIZE, bits.redBits,
+         EGL_GREEN_SIZE, bits.greenBits,
+@@ -2654,6 +2660,13 @@ static bool ksGpuContext_CreateForSurfaceEGL(ksGpuContext *context, const ksGpuD
+ 
+     EGL(eglBindAPI(EGL_OPENGL_ES_API));
+ 
++    const EGLint pbufferAttribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
++    context->fallbackSurface = eglCreatePbufferSurface(context->dpy, config, pbufferAttribs);
++    if (context->fallbackSurface == EGL_NO_SURFACE) {
++        Error("eglCreatePbufferSurface failed: %s", EglErrorString(eglGetError()));
++        return false;
++    }
++
+     return true;
+ }
+ 
+diff --git a/src/common/gfxwrapper_opengl.h b/src/common/gfxwrapper_opengl.h
+index 0e4e9c7..c0cc4cd 100644
+--- a/src/common/gfxwrapper_opengl.h
++++ b/src/common/gfxwrapper_opengl.h
+@@ -534,6 +534,7 @@ typedef struct {
+ #if defined(XR_USE_PLATFORM_EGL)
+     EGLDisplay dpy;
+     EGLContext ctx;
++    EGLSurface fallbackSurface;
+ #endif
+ 
+ #if defined(OS_WINDOWS)

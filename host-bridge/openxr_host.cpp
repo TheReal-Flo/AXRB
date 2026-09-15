@@ -69,6 +69,7 @@ void print_usage()
     std::fprintf(stderr, "Usage:\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve [port] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve-openxr [port] [frames]\n");
+    std::fprintf(stderr, "  axrb-host-bridge --serve-images [port] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve-gpu-fds [socket-path] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --video-recv-udp [port] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --video-send-synthetic [host] [port] [frames] [fps]\n");
@@ -1326,6 +1327,15 @@ int OpenXrHost::run(int argc, char** argv)
                          descriptor.plane_count,
                          fds.size());
         });
+    }
+
+    if (mode == "--serve-images") {
+        uint16_t port = 38491;
+        uint32_t frames = 0;
+        if (argc >= 3 && !parse_u16(argv[2], &port)) { return 2; }
+        if (argc >= 4 && !parse_u32(argv[3], &frames)) { return 2; }
+        axrb::protocol::TcpImageServer receiver;
+        return receiver.serve(port, frames);
     }
 
     if (mode == "--video-recv-udp") {

@@ -259,6 +259,21 @@ int main()
     XrSwapchainImageWaitInfo waitSwapchainInfo{};
     waitSwapchainInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
     waitSwapchainInfo.timeout = 0;
+    // hello_xr allocates one swapchain per eye. Creating/acquiring/destroying
+    // the second must not reset the first eye's outstanding acquisition.
+    XrSwapchain secondEye = nullptr;
+    uint32_t secondEyeIndex = 0;
+    XrSwapchainImageReleaseInfo secondRelease{};
+    secondRelease.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+    if (xrCreateSwapchain(session, &swapchainCreateInfo, &secondEye) != XR_SUCCESS ||
+        secondEye == swapchain ||
+        xrAcquireSwapchainImage(secondEye, &acquireInfo, &secondEyeIndex) != XR_SUCCESS ||
+        xrWaitSwapchainImage(secondEye, &waitSwapchainInfo) != XR_SUCCESS ||
+        xrReleaseSwapchainImage(secondEye, &secondRelease) != XR_SUCCESS ||
+        xrDestroySwapchain(secondEye) != XR_SUCCESS ||
+        xrAcquireSwapchainImage(secondEye, &acquireInfo, &secondEyeIndex) != XR_ERROR_HANDLE_INVALID) {
+        return EXIT_FAILURE;
+    }
     if (xrWaitSwapchainImage(swapchain, &waitSwapchainInfo) != XR_SUCCESS) {
         return EXIT_FAILURE;
     }
