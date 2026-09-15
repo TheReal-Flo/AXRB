@@ -81,8 +81,8 @@ edits; the build helper preserves those edits.
   binding and projection swapchain initialized, the host session ran with live
   headset poses, and the bridge logged `submitting Android image frames to
   SteamVR (512x512 layers=1)`. More than 140 Android frames arrived with no
-  logged OpenXR submission errors. This verifies API submission; visual quality
-  inside the headset still needs wearer confirmation.
+  logged OpenXR submission errors. The headset wearer confirmed seeing the
+  colored cubes, verifying visible output through the complete bridge path.
 
 To repeat frame inspection without a headset, run `--serve 38490` instead of
 `--serve-openxr`, launch the sample, then run:
