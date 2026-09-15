@@ -597,6 +597,36 @@ struct XrFrameEndInfo {
     const void* const* layers;
 };
 
+struct XrOffset2Di { int32_t x; int32_t y; };
+struct XrExtent2Di { int32_t width; int32_t height; };
+struct XrRect2Di { XrOffset2Di offset; XrExtent2Di extent; };
+struct XrSwapchainSubImage {
+    XrSwapchain swapchain;
+    XrRect2Di imageRect;
+    uint32_t imageArrayIndex;
+};
+struct XrCompositionLayerBaseHeader {
+    XrStructureType type;
+    const void* next;
+    XrCompositionLayerFlags layerFlags;
+    XrSpace space;
+};
+struct XrCompositionLayerProjectionView {
+    XrStructureType type;
+    const void* next;
+    XrPosef pose;
+    XrFovf fov;
+    XrSwapchainSubImage subImage;
+};
+struct XrCompositionLayerProjection {
+    XrStructureType type;
+    const void* next;
+    XrCompositionLayerFlags layerFlags;
+    XrSpace space;
+    uint32_t viewCount;
+    const XrCompositionLayerProjectionView* views;
+};
+
 struct XrEventDataBuffer {
     XrStructureType type;
     const void* next;

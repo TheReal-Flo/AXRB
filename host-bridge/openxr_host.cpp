@@ -275,29 +275,34 @@ private:
 };
 
 struct HostImageFrame {
-    void store(const axrb::protocol::ImageFrameHeader& newHeader, std::vector<uint8_t>&& newPixels)
+    void store(const axrb::protocol::ImageFrameHeader& newHeader, std::vector<uint8_t>&& newPixels,
+               const axrb::protocol::ImageProjection& newProjection = {})
     {
         static axrb::protocol::PerfStats stats("host-image-arrival");
         stats.record(0);
         std::lock_guard<std::mutex> lock(mutex);
         header = newHeader;
+        projection = newProjection;
         pixels = std::make_shared<std::vector<uint8_t>>(std::move(newPixels));
         hasFrame = true;
     }
 
-    bool snapshot(axrb::protocol::ImageFrameHeader* outHeader, std::shared_ptr<const std::vector<uint8_t>>* outPixels)
+    bool snapshot(axrb::protocol::ImageFrameHeader* outHeader, std::shared_ptr<const std::vector<uint8_t>>* outPixels,
+                  axrb::protocol::ImageProjection* outProjection)
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (!hasFrame || pixels == nullptr) {
             return false;
         }
         *outHeader = header;
+        *outProjection = projection;
         *outPixels = pixels;
         return true;
     }
 
     std::mutex mutex;
     axrb::protocol::ImageFrameHeader header{};
+    axrb::protocol::ImageProjection projection{};
     std::shared_ptr<std::vector<uint8_t>> pixels;
     bool hasFrame = false;
 };
@@ -797,6 +802,8 @@ private:
 
         projectionImages_.resize(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
         uploadedAndroidSequenceByImage_.assign(imageCount, UINT64_MAX);
+        uploadedProjectionByImage_.resize(imageCount);
+        uploadedExtentByImage_.resize(imageCount, {512, 512});
         result = enumerateSwapchainImages_(
             projectionSwapchain_,
             imageCount,
@@ -865,6 +872,15 @@ private:
             projectionViews[i].fov.angleRight = kAppProjectionHalfFovRadians;
             projectionViews[i].fov.angleUp = kAppProjectionHalfFovRadians;
             projectionViews[i].fov.angleDown = -kAppProjectionHalfFovRadians;
+            // Metadata must describe the camera that rendered this exact
+            // texture, not the newest tracking pose sampled after rendering.
+            const auto& projection = uploadedProjectionByImage_[imageIndex];
+            if (projection.view_count == 2) {
+                const auto& eye = projection.views[i];
+                projectionViews[i].pose.position = {eye.pose.x, eye.pose.y, eye.pose.z};
+                projectionViews[i].pose.orientation = {eye.pose.qx, eye.pose.qy, eye.pose.qz, eye.pose.qw};
+                projectionViews[i].fov = {eye.angle_left, eye.angle_right, eye.angle_up, eye.angle_down};
+            }
             projectionViews[i].subImage.swapchain = projectionSwapchain_;
             projectionViews[i].subImage.imageRect.offset = {0, 0};
             projectionViews[i].subImage.imageRect.extent = {
@@ -872,6 +888,9 @@ private:
                 static_cast<int32_t>(projectionHeight_),
             };
             projectionViews[i].subImage.imageArrayIndex = i;
+            if (projection.view_count == 2) {
+                projectionViews[i].subImage.imageRect.extent = uploadedExtentByImage_[imageIndex];
+            }
         }
 
         projectionLayer.space = localSpace_;
@@ -928,8 +947,9 @@ private:
         }
 
         axrb::protocol::ImageFrameHeader header{};
+        axrb::protocol::ImageProjection projection{};
         std::shared_ptr<const std::vector<uint8_t>> pixels;
-        if (!imageFrame_->snapshot(&header, &pixels)) {
+        if (!imageFrame_->snapshot(&header, &pixels, &projection)) {
             return false;
         }
         if (header.width == 0 || header.height == 0 || header.layers == 0 || pixels == nullptr || pixels->empty()) {
@@ -937,6 +957,9 @@ private:
         }
         if (header.sequence == uploadedAndroidSequenceByImage_[imageIndex]) {
             return true;
+        }
+        if (projection.view_count == 2 && (header.width > projectionWidth_ || header.height > projectionHeight_)) {
+            return false; // Cropping here would change the angular scale.
         }
 
         const uint32_t copyWidth = header.width < projectionWidth_ ? header.width : projectionWidth_;
@@ -1010,6 +1033,16 @@ private:
             reportedAndroidImageSubmit_ = true;
         }
         uploadedAndroidSequenceByImage_[imageIndex] = header.sequence;
+        uploadedProjectionByImage_[imageIndex] = projection;
+        uploadedExtentByImage_[imageIndex] = {static_cast<int32_t>(copyWidth), static_cast<int32_t>(copyHeight)};
+        if (projection.view_count == 2 && !reportedStereoProjection_) {
+            const auto& l = projection.views[0];
+            const auto& r = projection.views[1];
+            const float dx = r.pose.x-l.pose.x, dy = r.pose.y-l.pose.y, dz = r.pose.z-l.pose.z;
+            std::fprintf(stderr, "AXRB OpenXR: stereo render metadata active; camera separation=%.1fmm left FOV=(%.3f %.3f %.3f %.3f)\n",
+                         std::sqrt(dx*dx+dy*dy+dz*dz)*1000, l.angle_left, l.angle_right, l.angle_up, l.angle_down);
+            reportedStereoProjection_ = true;
+        }
         return true;
     }
 #endif
@@ -1300,6 +1333,9 @@ private:
     XrSwapchain projectionSwapchain_ = XR_NULL_HANDLE;
     std::vector<XrSwapchainImageD3D11KHR> projectionImages_;
     std::vector<uint64_t> uploadedAndroidSequenceByImage_;
+    std::vector<axrb::protocol::ImageProjection> uploadedProjectionByImage_;
+    std::vector<XrExtent2Di> uploadedExtentByImage_;
+    bool reportedStereoProjection_ = false;
     int64_t projectionFormat_ = 0;
     uint32_t projectionWidth_ = 512;
     uint32_t projectionHeight_ = 512;
@@ -1504,8 +1540,8 @@ int OpenXrHost::run(int argc, char** argv)
             imageServer.serve_with_callback(
                 38491,
                 0,
-                [&](const axrb::protocol::ImageFrameHeader& header, std::vector<uint8_t>&& pixels) {
-                    imageFrame.store(header, std::move(pixels));
+                [&](const axrb::protocol::ImageFrameHeader& header, const axrb::protocol::ImageProjection& projection, std::vector<uint8_t>&& pixels) {
+                    imageFrame.store(header, std::move(pixels), projection);
                 });
         });
         imageThread.detach();

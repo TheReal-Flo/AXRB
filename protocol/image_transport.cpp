@@ -151,11 +151,15 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
                 break;
             }
 
+            const bool projected = header.version == kProjectionImageFrameVersion;
+            const uint32_t expectedHeaderSize = sizeof(ImageFrameHeader) + (projected ? sizeof(ImageProjection) : 0);
             if (header.magic != kImageFrameMagic ||
-                header.version != kImageFrameVersion ||
-                header.header_size != sizeof(ImageFrameHeader) ||
+                (header.version != kImageFrameVersion && !projected) ||
+                header.type != kImageFrameTypeRgba8 || header.header_size != expectedHeaderSize ||
                 header.format != kImageFrameFormatRgba8 ||
-                header.bytes_per_pixel != 4) {
+                header.bytes_per_pixel != 4 || !header.width || !header.height ||
+                header.width > 4096 || header.height > 4096 || !header.layers || header.layers > 4 ||
+                (projected && header.layers != 2)) {
                 std::fprintf(stderr, "AXRB Image TCP: invalid image header\n");
                 close_socket(client);
                 break;
@@ -171,6 +175,12 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             }
 
             std::vector<uint8_t> payload;
+            ImageProjection projection{};
+            if (projected && (!recv_all(client, &projection, sizeof(projection)) || !valid_projection(projection))) {
+                std::fprintf(stderr, "AXRB Image TCP: invalid projection metadata\n");
+                close_socket(client);
+                break;
+            }
             if (!recv_payload(client, &payload, header.payload_size)) {
                 std::fprintf(stderr, "AXRB Image TCP: client disconnected during payload\n");
                 close_socket(client);
@@ -178,7 +188,7 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             }
 
             if (callback) {
-                callback(header, std::move(payload));
+                callback(header, projection, std::move(payload));
             }
 
             if (receivedFrames % 10 == 0) {

@@ -340,6 +340,46 @@ int main()
         return EXIT_FAILURE;
     }
 
+    // Submit actual per-eye subimages, including a shared array swapchain.
+    XrCompositionLayerProjectionView projectionViews[2]{};
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        auto& view = projectionViews[eye];
+        view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+        view.pose = views[eye].pose;
+        view.fov = views[eye].fov;
+        view.subImage.swapchain = swapchain;
+        view.subImage.imageRect = {{0, 0}, {1024, 1024}};
+        view.subImage.imageArrayIndex = eye;
+    }
+    XrCompositionLayerProjection projection{};
+    projection.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
+    projection.space = space;
+    projection.viewCount = 2;
+    projection.views = projectionViews;
+    const void* layers[] = {&projection};
+    endInfo.layerCount = 1;
+    endInfo.layers = layers;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) { return EXIT_FAILURE; }
+    projectionViews[1].subImage.imageArrayIndex = 2;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_SWAPCHAIN_RECT_INVALID) { return EXIT_FAILURE; }
+    projectionViews[1].subImage.imageArrayIndex = 1;
+    projectionViews[1].subImage.imageRect.offset.x = 1;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_SWAPCHAIN_RECT_INVALID) { return EXIT_FAILURE; }
+    projectionViews[1].subImage.imageRect.offset.x = 0;
+    projectionViews[1].fov.angleLeft = projectionViews[1].fov.angleRight;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_LAYER_INVALID) { return EXIT_FAILURE; }
+    projectionViews[1].fov = views[1].fov;
+
+    // Separate eye swapchains must both have a released image before submission.
+    if (xrCreateSwapchain(session, &swapchainCreateInfo, &secondEye) != XR_SUCCESS) { return EXIT_FAILURE; }
+    projectionViews[1].subImage.swapchain = secondEye;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_CALL_ORDER_INVALID ||
+        xrAcquireSwapchainImage(secondEye, &acquireInfo, &secondEyeIndex) != XR_SUCCESS ||
+        xrWaitSwapchainImage(secondEye, &waitSwapchainInfo) != XR_SUCCESS ||
+        xrReleaseSwapchainImage(secondEye, &releaseInfo) != XR_SUCCESS ||
+        xrEndFrame(session, &endInfo) != XR_SUCCESS ||
+        xrDestroySwapchain(secondEye) != XR_SUCCESS) { return EXIT_FAILURE; }
+
     if (xrDestroySwapchain(swapchain) != XR_SUCCESS) {
         return EXIT_FAILURE;
     }

@@ -154,11 +154,18 @@ OpenXR bridge or `--serve-images` receiver. For a sustained transport check:
 - Hardware rendering and frame transfer are separate. The current GLES
   swapchain path still does `glReadPixels`, RGBA TCP transfer, and a D3D11 upload.
   GPU rendering does not make this transport zero-copy or guarantee VR latency.
-- Multiple eye swapchains now have separate textures and acquisition state.
-  The prototype frame export still selects the last released swapchain; correct
-  composition of separate left/right eye images remains unfinished: the host
-  currently duplicates the single exported eye into both headset eyes.
-  Headset-rate performance and visual quality have not been validated.
+- The Windows emulator path exports both eyes from the application's submitted
+  projection layer, respecting each swapchain rectangle and array index. The
+  host uses the original render poses and fields of view for those pixels.
+  This restores binocular depth instead of duplicating the last released eye.
+  Eye spacing is still a fixed 63 mm; headset-specific calibration is unfinished.
+  Only one opaque stereo projection layer is supported, with matching output
+  dimensions capped at 512 by 512 per eye.
+- Stereo TCP frames use image protocol v2: the 64-byte header is followed by
+  96 bytes of projection metadata, then left/right RGBA layers. Update both the
+  runtime APK and Windows host together. The host still accepts legacy v1;
+  the non-emulator Java proxy remains on the legacy path. The capture tool saves
+  both eye PNGs and render-camera JSON for v2 frames.
 - AXRB's OpenXR Vulkan implementation is incomplete: advertising
   `XR_KHR_vulkan_enable` currently does not provide a usable Vulkan swapchain
   implementation. A hardware Vulkan device in Android is necessary but is not

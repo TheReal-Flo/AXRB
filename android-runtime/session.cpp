@@ -6,6 +6,7 @@
 #include "perf_stats.h"
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -96,6 +97,7 @@ struct SwapchainRecord {
     bool created = false;
     bool acquired = false;
     bool waited = false;
+    bool hasReleasedImage = false;
     uint32_t nextImage = 0;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -111,6 +113,7 @@ uint32_t g_actionCount = 0;
 uint64_t g_nextPath = 1;
 uint64_t g_imageFrameSequence = 0;
 XrTime g_nextFrameStart = 0;
+axrb::protocol::PoseFrame g_lastViewPoseFrame{};
 
 void log_call(const char* name)
 {
@@ -441,7 +444,8 @@ public:
         uint32_t height,
         uint32_t layers,
         const uint8_t* payload,
-        uint64_t payloadSize)
+        uint64_t payloadSize,
+        const axrb::protocol::ImageProjection* projection = nullptr)
     {
         static axrb::protocol::PerfStats stats("image-send");
         axrb::protocol::PerfScope scope(stats);
@@ -460,8 +464,14 @@ public:
         header.sequence = sequence;
         header.monotonic_time_ns = static_cast<uint64_t>(monotonic_time_ns());
         header.payload_size = payloadSize;
+        if (projection && directWindows_) {
+            header.version = axrb::protocol::kProjectionImageFrameVersion;
+            header.header_size += sizeof(*projection);
+        }
 
-        if (!send_all(&header, sizeof(header)) || !send_all(payload, static_cast<size_t>(payloadSize))) {
+        if (!send_all(&header, sizeof(header)) ||
+            (projection && directWindows_ && !send_all(projection, sizeof(*projection))) ||
+            !send_all(payload, static_cast<size_t>(payloadSize))) {
             if (!reportedSendFailure_) {
                 __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "send failed");
                 reportedSendFailure_ = true;
@@ -504,6 +514,7 @@ private:
             inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
             if (::connect(candidate, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
                 socket_ = candidate;
+                directWindows_ = true;
                 __android_log_print(ANDROID_LOG_INFO, "AXRB.Image", "connected to Windows image stream via adb reverse :38491");
                 return true;
             }
@@ -568,6 +579,7 @@ private:
     }
 
     int socket_ = -1;
+    bool directWindows_ = false;
     int lastError_ = 0;
     XrTime lastConnectAttemptNs_ = 0;
     bool reportedConnectFailure_ = false;
@@ -581,8 +593,11 @@ ImageTransportClient& image_transport_client()
     return client;
 }
 
-void maybe_send_swapchain_image(const SwapchainRecord& sc)
+void maybe_send_swapchain_image(const SwapchainRecord& sc,
+                               const XrSwapchainSubImage* subImage = nullptr,
+                               std::vector<uint8_t>* readback = nullptr)
 {
+    if (readback) { readback->clear(); }
     const auto readbackStart = std::chrono::steady_clock::now();
     static bool reportedEntry = false;
     static bool reportedMissingSwapchain = false;
@@ -609,7 +624,7 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc)
         return;
     }
 
-    const uint64_t sequence = g_imageFrameSequence++;
+    const uint64_t sequence = readback ? 0 : g_imageFrameSequence++;
     if (sc.width > 4096 || sc.height > 4096 || sc.arraySize > 4) {
         if (!reportedOversize) {
             __android_log_print(
@@ -625,12 +640,17 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc)
     }
 
     constexpr uint32_t kMaxTransportDimension = 512;
+    const uint32_t sourceWidth = subImage ? subImage->imageRect.extent.width : sc.width;
+    const uint32_t sourceHeight = subImage ? subImage->imageRect.extent.height : sc.height;
+    const GLint sourceX = subImage ? subImage->imageRect.offset.x : 0;
+    const GLint sourceY = subImage ? subImage->imageRect.offset.y : 0;
+    const uint32_t layerCount = subImage ? 1 : sc.arraySize;
     const uint32_t transportWidth =
-        sc.width > kMaxTransportDimension ? kMaxTransportDimension : sc.width;
+        sourceWidth > kMaxTransportDimension ? kMaxTransportDimension : sourceWidth;
     const uint32_t transportHeight =
-        sc.height > kMaxTransportDimension ? kMaxTransportDimension : sc.height;
+        sourceHeight > kMaxTransportDimension ? kMaxTransportDimension : sourceHeight;
     const uint64_t layerBytes = static_cast<uint64_t>(transportWidth) * transportHeight * 4;
-    const uint64_t payloadBytes = layerBytes * sc.arraySize;
+    const uint64_t payloadBytes = layerBytes * layerCount;
     if (payloadBytes > 128ull * 1024ull * 1024ull) {
         return;
     }
@@ -693,7 +713,7 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc)
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
 
     bool ok = true;
-    for (uint32_t layer = 0; layer < sc.arraySize; ++layer) {
+    for (uint32_t layer = 0; layer < layerCount; ++layer) {
         while (glGetError() != GL_NO_ERROR) {
         }
         glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFramebuffer);
@@ -703,7 +723,7 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc)
                 GL_COLOR_ATTACHMENT0,
                 sc.textures[sc.releasedImage],
                 0,
-                static_cast<GLint>(layer));
+                static_cast<GLint>(subImage ? subImage->imageArrayIndex : layer));
         } else {
             glFramebufferTexture2D(
                 GL_READ_FRAMEBUFFER,
@@ -740,10 +760,10 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc)
             break;
         }
         glBlitFramebuffer(
-            0,
-            0,
-            static_cast<GLint>(sc.width),
-            static_cast<GLint>(sc.height),
+            sourceX,
+            sourceY,
+            sourceX + static_cast<GLint>(sourceWidth),
+            sourceY + static_cast<GLint>(sourceHeight),
             0,
             0,
             static_cast<GLint>(transportWidth),
@@ -785,6 +805,12 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc)
     if (!ok) {
         return;
     }
+    if (readback) {
+        *readback = payload;
+        static axrb::protocol::PerfStats stats("eye-readback");
+        stats.record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - readbackStart).count());
+        return;
+    }
 
     if (!reportedReadback) {
         __android_log_print(
@@ -823,6 +849,75 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc)
 #else
 void maybe_send_swapchain_image(const SwapchainRecord&) {}
 #endif
+
+XrResult submit_projection_frame(const XrFrameEndInfo& info)
+{
+    if (info.layerCount == 0) { return XR_SUCCESS; }
+    if (info.layerCount != 1 || info.layers == nullptr || info.layers[0] == nullptr) { return XR_ERROR_LAYER_INVALID; }
+    const auto* layer = static_cast<const XrCompositionLayerProjection*>(info.layers[0]);
+    if (layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION || layer->viewCount != 2 || layer->views == nullptr ||
+        layer->layerFlags != 0) { return XR_ERROR_LAYER_INVALID; }
+    const auto* space = find_space(layer->space);
+    if (!space) { return XR_ERROR_HANDLE_INVALID; }
+    const XrPosef spaceWorld = world_pose_for_space(*space, g_lastViewPoseFrame);
+    axrb::protocol::ImageProjection projection{};
+    projection.view_count = 2;
+    std::array<SwapchainRecord*, 2> swapchains{};
+    uint32_t width = 0, height = 0;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const auto& view = layer->views[eye];
+        if (view.type != XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW) { return XR_ERROR_LAYER_INVALID; }
+        const auto& sub = view.subImage;
+        auto* sc = find_swapchain(sub.swapchain);
+        if (!sc) { return XR_ERROR_HANDLE_INVALID; }
+        if (!sc->hasReleasedImage) { return XR_ERROR_CALL_ORDER_INVALID; }
+        const auto& rect = sub.imageRect;
+        if (rect.offset.x < 0 || rect.offset.y < 0 || rect.extent.width <= 0 || rect.extent.height <= 0 ||
+            static_cast<uint64_t>(rect.offset.x) + rect.extent.width > sc->width ||
+            static_cast<uint64_t>(rect.offset.y) + rect.extent.height > sc->height ||
+            sub.imageArrayIndex >= sc->arraySize) { return XR_ERROR_SWAPCHAIN_RECT_INVALID; }
+        const uint32_t eyeWidth = std::min<uint32_t>(512, rect.extent.width);
+        const uint32_t eyeHeight = std::min<uint32_t>(512, rect.extent.height);
+        if (eye == 0) { width = eyeWidth; height = eyeHeight; }
+        if (width != eyeWidth || height != eyeHeight) { return XR_ERROR_LAYER_INVALID; }
+        swapchains[eye] = sc;
+        const auto pose = multiply_pose(spaceWorld, view.pose);
+        auto& out = projection.views[eye];
+        out.pose = {pose.position.x, pose.position.y, pose.position.z,
+                    pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+        out.angle_left = view.fov.angleLeft;
+        out.angle_right = view.fov.angleRight;
+        out.angle_up = view.fov.angleUp;
+        out.angle_down = view.fov.angleDown;
+    }
+    if (!axrb::protocol::valid_projection(projection)) { return XR_ERROR_LAYER_INVALID; }
+#if defined(__ANDROID__)
+    char hardware[PROP_VALUE_MAX]{};
+    __system_property_get("ro.hardware", hardware);
+    if (std::strcmp(hardware, "ranchu") != 0 && std::strcmp(hardware, "goldfish") != 0) {
+        // The legacy Java proxy understands only v1. Preserve that development path.
+        if (g_lastReleasedSwapchain) { maybe_send_swapchain_image(*g_lastReleasedSwapchain); }
+        return XR_SUCCESS;
+    }
+    static std::vector<uint8_t> eyes[2];
+    static std::vector<uint8_t> stereo;
+    const size_t eyeBytes = static_cast<size_t>(width) * height * 4;
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        maybe_send_swapchain_image(*swapchains[eye], &layer->views[eye].subImage, &eyes[eye]);
+        if (eyes[eye].size() != eyeBytes) { return XR_ERROR_RUNTIME_FAILURE; }
+    }
+    stereo.resize(eyeBytes * 2);
+    std::memcpy(stereo.data(), eyes[0].data(), eyeBytes);
+    std::memcpy(stereo.data() + eyeBytes, eyes[1].data(), eyeBytes);
+    const uint64_t sequence = g_imageFrameSequence++;
+    if (image_transport_client().send_frame(sequence, width, height, 2, stereo.data(), stereo.size(), &projection) && sequence % 450 == 0) {
+        __android_log_print(ANDROID_LOG_INFO, "AXRB.Stereo", "sent two eyes seq=%llu %ux%u source textures=%u,%u",
+            static_cast<unsigned long long>(sequence), width, height,
+            swapchains[0]->textures[swapchains[0]->releasedImage], swapchains[1]->textures[swapchains[1]->releasedImage]);
+    }
+#endif
+    return XR_SUCCESS;
+}
 
 XrResult XRAPI_CALL xrCreateInstance_impl(const XrInstanceCreateInfo* createInfo, XrInstance* instance)
 {
@@ -1394,6 +1489,7 @@ XrResult XRAPI_CALL xrReleaseSwapchainImage_impl(
     sc.acquired = false;
     sc.waited = false;
     sc.releasedImage = sc.currentImage;
+    sc.hasReleasedImage = true;
     g_lastReleasedSwapchain = &sc;
     return XR_SUCCESS;
 }
@@ -1892,6 +1988,7 @@ XrResult XRAPI_CALL xrLocateViews_impl(
 
     SpaceRecord* baseRecord = find_space(viewLocateInfo->space);
     const axrb::protocol::PoseFrame& poseFrame = pose_client().latest_pose_frame();
+    g_lastViewPoseFrame = poseFrame;
     const XrPosef hmdWorld = protocol_pose_to_xr(poseFrame.hmd);
     const XrPosef baseWorld = world_pose_for_space(*baseRecord, poseFrame);
     const uint32_t count = viewCapacityInput < 2 ? viewCapacityInput : 2;
@@ -1980,11 +2077,10 @@ XrResult XRAPI_CALL xrEndFrame_impl(XrSession session, const XrFrameEndInfo* fra
     if (frameEndInfo == nullptr || frameEndInfo->type != XR_TYPE_FRAME_END_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    if (g_lastReleasedSwapchain) { maybe_send_swapchain_image(*g_lastReleasedSwapchain); }
     if (g_sessionState != XR_SESSION_STATE_FOCUSED) {
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
-    return XR_SUCCESS;
+    return submit_projection_frame(*frameEndInfo);
 }
 
 template <typename Function>

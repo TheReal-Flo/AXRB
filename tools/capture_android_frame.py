@@ -3,6 +3,7 @@ import argparse
 import socket
 import struct
 import zlib
+import json
 from pathlib import Path
 
 
@@ -36,20 +37,35 @@ def main():
             header = read_exact(connection, 64)
             magic, version, kind, size, width, height, layers, fmt, bpp, _ = struct.unpack_from('<IHH7I', header)
             sequence, _, payload_size = struct.unpack_from('<QQQ', header, 40)
-            if (magic, version, kind, size, fmt, bpp) != (0x49585241, 1, 2, 64, 1, 4):
+            if (magic, kind, fmt, bpp) != (0x49585241, 2, 1, 4) or (version, size) not in ((1, 64), (2, 160)):
                 raise ValueError('Unsupported AXRB frame header')
             if not width or not height or not layers or payload_size != width * height * layers * 4 or payload_size > 128 * 1024 * 1024:
                 raise ValueError('Invalid image dimensions or payload size')
-            rgba = read_exact(connection, payload_size)[:width * height * 4]
-    # OpenGL's first row is the bottom of the image. Export the first layer.
+            metadata = read_exact(connection, 96) if version == 2 else None
+            payload = read_exact(connection, payload_size)
+    eye_bytes = width * height * 4
+    write_png(args.output, width, height, payload[:eye_bytes])
+    if metadata:
+        count, reserved = struct.unpack_from('<II', metadata)
+        if count != 2 or reserved != 0 or layers != 2:
+            raise ValueError('Invalid stereo metadata')
+        views = [struct.unpack_from('<11f', metadata, 8 + eye * 44) for eye in range(2)]
+        args.output.with_suffix('.json').write_text(json.dumps({'sequence': sequence, 'views_position_quaternion_fov': views}, indent=2))
+        right = args.output.with_name(args.output.stem + '-right.png')
+        write_png(right, width, height, payload[eye_bytes:eye_bytes * 2])
+        differences = sum(payload[i:i+3] != payload[eye_bytes+i:eye_bytes+i+3] for i in range(0, eye_bytes, 4))
+        print(f'Stereo: {differences}/{width * height} pixels differ; right eye -> {right}')
+    print(f'Captured frame {sequence}: {width}x{height}, layers={layers} -> {args.output}')
+
+
+def write_png(path, width, height, rgba):
+    # OpenGL's first row is the bottom of the image.
     rows = b''.join(b'\0' + rgba[y * width * 4:(y + 1) * width * 4] for y in reversed(range(height)))
     png = b'\x89PNG\r\n\x1a\n'
     png += chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0))
     png += chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b'')
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(png)
-    colors = len(set(zip(rgba[0::4], rgba[1::4], rgba[2::4])))
-    print(f'Captured frame {sequence}: {width}x{height}, {colors} unique RGB colors -> {args.output}')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
 
 
 if __name__ == '__main__':
