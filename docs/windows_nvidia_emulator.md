@@ -76,8 +76,13 @@ edits; the build helper preserves those edits.
   sample's colored 3D cubes, rather than the blank frame seen before the fix.
 - Native Windows build and all three CTest tests pass, including a new
   regression case for independent eye swapchain acquisition/destruction.
-- The PC OpenXR runtime returned `XR_ERROR_FORM_FACTOR_UNAVAILABLE` when
-  attempting headset submission, so no in-headset result is claimed.
+- Initial headset submission returned `XR_ERROR_FORM_FACTOR_UNAVAILABLE`.
+  Retesting with SteamVR running and the headset connected succeeded: D3D11
+  binding and projection swapchain initialized, the host session ran with live
+  headset poses, and the bridge logged `submitting Android image frames to
+  SteamVR (512x512 layers=1)`. More than 140 Android frames arrived with no
+  logged OpenXR submission errors. This verifies API submission; visual quality
+  inside the headset still needs wearer confirmation.
 
 To repeat frame inspection without a headset, run `--serve 38490` instead of
 `--serve-openxr`, launch the sample, then run:
@@ -100,8 +105,9 @@ OpenXR bridge or `--serve-images` receiver. For a sustained transport check:
   GPU rendering does not make this transport zero-copy or guarantee VR latency.
 - Multiple eye swapchains now have separate textures and acquisition state.
   The prototype frame export still selects the last released swapchain; correct
-  composition of separate left/right eye images remains unfinished. Headset
-  output and headset-rate performance have not been validated in this test.
+  composition of separate left/right eye images remains unfinished: the host
+  currently duplicates the single exported eye into both headset eyes.
+  Headset-rate performance and visual quality have not been validated.
 - AXRB's OpenXR Vulkan implementation is incomplete: advertising
   `XR_KHR_vulkan_enable` currently does not provide a usable Vulkan swapchain
   implementation. A hardware Vulkan device in Android is necessary but is not
