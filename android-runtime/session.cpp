@@ -4,6 +4,7 @@
 #include "openxr_dispatch/openxr_minimal.h"
 #include "pose_client.h"
 #include "perf_stats.h"
+#include "vulkan_backend.h"
 
 #include <array>
 #include <algorithm>
@@ -94,6 +95,9 @@ uint32_t g_spaceCount = 0;
 std::array<PathRecord, 64> g_paths{};
 uint32_t g_pathCount = 0;
 struct SwapchainRecord {
+#if defined(__ANDROID__)
+    VulkanSwapchain vulkan{};
+#endif
     bool created = false;
     bool acquired = false;
     bool waited = false;
@@ -114,6 +118,11 @@ uint64_t g_nextPath = 1;
 uint64_t g_imageFrameSequence = 0;
 XrTime g_nextFrameStart = 0;
 axrb::protocol::PoseFrame g_lastViewPoseFrame{};
+#if defined(__ANDROID__)
+VulkanBackend g_vulkan;
+bool g_vulkanRequirementsQueried = false;
+VkInstance g_vulkanInstance = VK_NULL_HANDLE;
+#endif
 
 void log_call(const char* name)
 {
@@ -376,6 +385,7 @@ void queue_session_state(XrSessionState state)
 void destroy_swapchain_images(SwapchainRecord& sc)
 {
 #if defined(__ANDROID__)
+    if (sc.vulkan.images[0]) { g_vulkan.destroy(sc.vulkan); }
     if (sc.textures[0] != 0 || sc.textures[1] != 0 || sc.textures[2] != 0) {
         glDeleteTextures(3, sc.textures);
     }
@@ -902,8 +912,16 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info)
     static std::vector<uint8_t> eyes[2];
     static std::vector<uint8_t> stereo;
     const size_t eyeBytes = static_cast<size_t>(width) * height * 4;
+    if (g_vulkan.active()) {
+        const VulkanSwapchain* vkSwapchains[] = {&swapchains[0]->vulkan, &swapchains[1]->vulkan};
+        const uint32_t indices[] = {swapchains[0]->releasedImage, swapchains[1]->releasedImage};
+        const XrSwapchainSubImage* subimages[] = {&layer->views[0].subImage, &layer->views[1].subImage};
+        if (!g_vulkan.readback(vkSwapchains, indices, subimages, eyes)) return XR_ERROR_RUNTIME_FAILURE;
+    }
     for (uint32_t eye = 0; eye < 2; ++eye) {
-        maybe_send_swapchain_image(*swapchains[eye], &layer->views[eye].subImage, &eyes[eye]);
+        if (!g_vulkan.active()) {
+            maybe_send_swapchain_image(*swapchains[eye], &layer->views[eye].subImage, &eyes[eye]);
+        }
         if (eyes[eye].size() != eyeBytes) { return XR_ERROR_RUNTIME_FAILURE; }
     }
     stereo.resize(eyeBytes * 2);
@@ -911,9 +929,9 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info)
     std::memcpy(stereo.data() + eyeBytes, eyes[1].data(), eyeBytes);
     const uint64_t sequence = g_imageFrameSequence++;
     if (image_transport_client().send_frame(sequence, width, height, 2, stereo.data(), stereo.size(), &projection) && sequence % 450 == 0) {
-        __android_log_print(ANDROID_LOG_INFO, "AXRB.Stereo", "sent two eyes seq=%llu %ux%u source textures=%u,%u",
+        __android_log_print(ANDROID_LOG_INFO, "AXRB.Stereo", "sent two eyes seq=%llu %ux%u API=%s",
             static_cast<unsigned long long>(sequence), width, height,
-            swapchains[0]->textures[swapchains[0]->releasedImage], swapchains[1]->textures[swapchains[1]->releasedImage]);
+            g_vulkan.active() ? "Vulkan" : "OpenGLES");
     }
 #endif
     return XR_SUCCESS;
@@ -945,6 +963,11 @@ XrResult XRAPI_CALL xrCreateInstance_impl(const XrInstanceCreateInfo* createInfo
     g_lastReleasedSwapchain = nullptr;
     g_imageFrameSequence = 0;
     g_nextFrameStart = 0;
+#if defined(__ANDROID__)
+    g_vulkan.shutdown();
+    g_vulkanRequirementsQueried = false;
+    g_vulkanInstance = VK_NULL_HANDLE;
+#endif
     return XR_SUCCESS;
 }
 
@@ -968,7 +991,13 @@ XrResult XRAPI_CALL xrInitializeLoaderKHR_impl(const void* loaderInitInfo)
 XrResult XRAPI_CALL xrDestroyInstance_impl(XrInstance instance)
 {
     log_call("xrDestroyInstance");
-    return is_valid_instance(instance) ? XR_SUCCESS : XR_ERROR_HANDLE_INVALID;
+    if (!is_valid_instance(instance)) return XR_ERROR_HANDLE_INVALID;
+    for (auto& sc : g_swapchains) { destroy_swapchain_images(sc); sc = {}; }
+    g_lastReleasedSwapchain = nullptr;
+#if defined(__ANDROID__)
+    g_vulkan.shutdown();
+#endif
+    return XR_SUCCESS;
 }
 
 XrResult XRAPI_CALL xrEnumerateInstanceExtensionProperties_impl(
@@ -989,6 +1018,9 @@ XrResult XRAPI_CALL xrEnumerateInstanceExtensionProperties_impl(
         "XR_KHR_android_create_instance",
         "XR_KHR_opengl_es_enable",
         "XR_KHR_vulkan_enable",
+#if defined(__ANDROID__)
+        "XR_KHR_vulkan_enable2",
+#endif
     };
 
     *propertyCountOutput = static_cast<uint32_t>(sizeof(kExtensions) / sizeof(kExtensions[0]));
@@ -1117,8 +1149,61 @@ XrResult XRAPI_CALL xrGetVulkanGraphicsRequirementsKHR_impl(
 
     graphicsRequirements->minApiVersionSupported = XR_MAKE_VERSION(1, 0, 0);
     graphicsRequirements->maxApiVersionSupported = XR_MAKE_VERSION(1, 1, 0);
+#if defined(__ANDROID__)
+    g_vulkanRequirementsQueried = true;
+#endif
     return XR_SUCCESS;
 }
+
+#if defined(__ANDROID__)
+XrResult XRAPI_CALL xrGetVulkanExtensionsKHR_impl(XrInstance instance, XrSystemId systemId,
+                                                uint32_t capacity, uint32_t* count, char* buffer) {
+    if (!is_valid_instance(instance)) return XR_ERROR_HANDLE_INVALID;
+    if (systemId != kSystemId) return XR_ERROR_SYSTEM_INVALID;
+    if (!count || (capacity && !buffer)) return XR_ERROR_VALIDATION_FAILURE;
+    *count = 1; // No runtime-specific Vulkan extensions are needed for CPU readback.
+    if (capacity) buffer[0] = '\0';
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL xrGetVulkanGraphicsDeviceKHR_impl(XrInstance instance, XrSystemId systemId,
+                                                    VkInstance vkInstance, VkPhysicalDevice* device) {
+    if (!is_valid_instance(instance)) return XR_ERROR_HANDLE_INVALID;
+    if (systemId != kSystemId) return XR_ERROR_SYSTEM_INVALID;
+    if (!vkInstance || !device) return XR_ERROR_VALIDATION_FAILURE;
+    *device = VulkanBackend::choose_device(vkInstance);
+    g_vulkanInstance = vkInstance;
+    return *device ? XR_SUCCESS : XR_ERROR_GRAPHICS_DEVICE_INVALID;
+}
+XrResult XRAPI_CALL xrGetVulkanGraphicsDevice2KHR_impl(XrInstance instance,
+        const XrVulkanGraphicsDeviceGetInfoKHR* info, VkPhysicalDevice* device) {
+    if (!info || info->type != XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR) return XR_ERROR_VALIDATION_FAILURE;
+    return xrGetVulkanGraphicsDeviceKHR_impl(instance, info->systemId, info->vulkanInstance, device);
+}
+XrResult XRAPI_CALL xrCreateVulkanInstanceKHR_impl(XrInstance instance, const XrVulkanInstanceCreateInfoKHR* info,
+                                                VkInstance* vkInstance, VkResult* result) {
+    if (!is_valid_instance(instance)) return XR_ERROR_HANDLE_INVALID;
+    if (!info || info->type != XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR || !vkInstance || !result ||
+        !info->vulkanCreateInfo || !info->pfnGetInstanceProcAddr || info->createFlags) return XR_ERROR_VALIDATION_FAILURE;
+    if (info->systemId != kSystemId) return XR_ERROR_SYSTEM_INVALID;
+    auto create = reinterpret_cast<PFN_vkCreateInstance>(info->pfnGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
+    if (!create) return XR_ERROR_RUNTIME_FAILURE;
+    *result = create(info->vulkanCreateInfo, info->vulkanAllocator, vkInstance);
+    if (*result == VK_SUCCESS) g_vulkanInstance = *vkInstance;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL xrCreateVulkanDeviceKHR_impl(XrInstance instance, const XrVulkanDeviceCreateInfoKHR* info,
+                                              VkDevice* device, VkResult* result) {
+    if (!is_valid_instance(instance)) return XR_ERROR_HANDLE_INVALID;
+    if (!info || info->type != XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR || !device || !result ||
+        !info->vulkanCreateInfo || !info->pfnGetInstanceProcAddr || info->createFlags) return XR_ERROR_VALIDATION_FAILURE;
+    if (info->systemId != kSystemId) return XR_ERROR_SYSTEM_INVALID;
+    if (!g_vulkanInstance || info->vulkanPhysicalDevice != VulkanBackend::choose_device(g_vulkanInstance)) return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+    auto create = reinterpret_cast<PFN_vkCreateDevice>(info->pfnGetInstanceProcAddr(g_vulkanInstance, "vkCreateDevice"));
+    if (!create) return XR_ERROR_RUNTIME_FAILURE;
+    *result = create(info->vulkanPhysicalDevice, info->vulkanCreateInfo, info->vulkanAllocator, device);
+    return XR_SUCCESS;
+}
+#endif
 
 XrResult XRAPI_CALL xrCreateSession_impl(
     XrInstance instance,
@@ -1136,6 +1221,16 @@ XrResult XRAPI_CALL xrCreateSession_impl(
         return XR_ERROR_SYSTEM_INVALID;
     }
 
+#if defined(__ANDROID__)
+    struct Base { XrStructureType type; const Base* next; };
+    for (auto* next = static_cast<const Base*>(createInfo->next); next; next = next->next) {
+        if (next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR) {
+            if (!g_vulkanRequirementsQueried) return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+            if (!g_vulkan.initialize(*reinterpret_cast<const XrGraphicsBindingVulkanKHR*>(next))) return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+            break;
+        }
+    }
+#endif
     *session = fake_session();
     g_pendingSessionEvents.clear();
     queue_session_state(XR_SESSION_STATE_IDLE);
@@ -1156,6 +1251,9 @@ XrResult XRAPI_CALL xrDestroySession_impl(XrSession session)
         sc = {};
     }
     g_lastReleasedSwapchain = nullptr;
+#if defined(__ANDROID__)
+    g_vulkan.shutdown();
+#endif
     return XR_SUCCESS;
 }
 
@@ -1317,11 +1415,14 @@ XrResult XRAPI_CALL xrEnumerateSwapchainFormats_impl(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    constexpr int64_t kFormats[] = {
+    const int64_t kFormats[] = {
+#if defined(__ANDROID__)
+        g_vulkan.active() ? 43 : 0x8058,
+        g_vulkan.active() ? 37 : 0x8C43,
+#else
         0x8058, // GL_RGBA8
         0x8C43, // GL_SRGB8_ALPHA8
-        37, // VK_FORMAT_R8G8B8A8_UNORM
-        43, // VK_FORMAT_B8G8R8A8_UNORM
+#endif
     };
 
     *formatCountOutput = static_cast<uint32_t>(sizeof(kFormats) / sizeof(kFormats[0]));
@@ -1369,7 +1470,13 @@ XrResult XRAPI_CALL xrCreateSwapchain_impl(
     sc.height = createInfo->height;
     sc.arraySize = createInfo->arraySize;
     sc.format = createInfo->format;
-    create_opengles_swapchain_images(sc, *createInfo);
+#if defined(__ANDROID__)
+    if (g_vulkan.active()) {
+        const XrResult result = g_vulkan.create(sc.vulkan, *createInfo);
+        if (result != XR_SUCCESS) { sc = {}; return result; }
+    } else
+#endif
+    { create_opengles_swapchain_images(sc, *createInfo); }
     *swapchain = reinterpret_cast<XrSwapchain>(&sc);
     return XR_SUCCESS;
 }
@@ -1406,6 +1513,9 @@ XrResult XRAPI_CALL xrEnumerateSwapchainImages_impl(
     if (imageCapacityInput > 0 && images != nullptr) {
         const uint32_t count = imageCapacityInput < *imageCountOutput ? imageCapacityInput : *imageCountOutput;
         if (images[0].type == XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR) {
+#if defined(__ANDROID__)
+            if (g_vulkan.active()) return XR_ERROR_VALIDATION_FAILURE;
+#endif
             auto* glImages = reinterpret_cast<XrSwapchainImageOpenGLESKHR*>(images);
             for (uint32_t i = 0; i < count; ++i) {
                 if (glImages[i].type != XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR) {
@@ -1419,7 +1529,12 @@ XrResult XRAPI_CALL xrEnumerateSwapchainImages_impl(
                 if (vkImages[i].type != XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR) {
                     return XR_ERROR_VALIDATION_FAILURE;
                 }
-                vkImages[i].image = 0;
+#if defined(__ANDROID__)
+                if (!g_vulkan.active()) return XR_ERROR_VALIDATION_FAILURE;
+                vkImages[i].image = reinterpret_cast<uint64_t>(sc.vulkan.images[i]);
+#else
+                return XR_ERROR_FEATURE_UNSUPPORTED;
+#endif
             }
         } else {
             return XR_ERROR_VALIDATION_FAILURE;
@@ -2144,6 +2259,20 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr_impl(
         *function = cast_function(xrGetOpenGLESGraphicsRequirementsKHR_impl);
     } else if (requested == "xrGetVulkanGraphicsRequirementsKHR") {
         *function = cast_function(xrGetVulkanGraphicsRequirementsKHR_impl);
+#if defined(__ANDROID__)
+    } else if (requested == "xrGetVulkanGraphicsRequirements2KHR") {
+        *function = cast_function(xrGetVulkanGraphicsRequirementsKHR_impl);
+    } else if (requested == "xrGetVulkanInstanceExtensionsKHR" || requested == "xrGetVulkanDeviceExtensionsKHR") {
+        *function = cast_function(xrGetVulkanExtensionsKHR_impl);
+    } else if (requested == "xrGetVulkanGraphicsDeviceKHR") {
+        *function = cast_function(xrGetVulkanGraphicsDeviceKHR_impl);
+    } else if (requested == "xrGetVulkanGraphicsDevice2KHR") {
+        *function = cast_function(xrGetVulkanGraphicsDevice2KHR_impl);
+    } else if (requested == "xrCreateVulkanInstanceKHR") {
+        *function = cast_function(xrCreateVulkanInstanceKHR_impl);
+    } else if (requested == "xrCreateVulkanDeviceKHR") {
+        *function = cast_function(xrCreateVulkanDeviceKHR_impl);
+#endif
     } else if (requested == "xrCreateSession") {
         *function = cast_function(xrCreateSession_impl);
     } else if (requested == "xrBeginSession") {

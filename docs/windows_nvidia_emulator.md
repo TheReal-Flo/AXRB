@@ -123,9 +123,76 @@ To switch back, stop the ARM64 sample and reinstall the x86_64 runtime:
 ```
 
 This image does **not** advertise `armeabi-v7a` (32-bit ARM). ARM64 translation
-also does not supply Meta/Oculus APIs, missing OpenXR extensions, or AXRB Vulkan
-swapchains. Inspect each game's ABI and runtime requirements before expecting
+also does not supply Meta/Oculus APIs or missing OpenXR extensions.
+Inspect each game's ABI and runtime requirements before expecting
 it to work.
+
+## Vulkan rendering
+
+The Android runtime now implements both `XR_KHR_vulkan_enable` and
+`XR_KHR_vulkan_enable2` for the Windows emulator path. The application renders
+into real Vulkan images on Nvidia hardware. The runtime uses the application's
+graphics queue, scales both submitted eye rectangles on the GPU, copies them
+to cached host-visible staging memory, and forwards the stereo pixels and
+original render poses/FOV through the existing AXRI v2 transport. Image layouts
+are restored to `COLOR_ATTACHMENT_OPTIMAL` before reuse. This follows the
+[OpenXR Vulkan image-state requirements](https://registry.khronos.org/OpenXR/specs/1.1/man/html/XR_KHR_vulkan_enable-swapchain-image-state.html).
+
+To build and run the translated ARM64 Vulkan sample with the emulator and
+Windows `--serve-openxr 38490` host already running:
+
+```powershell
+.\android-runtime-apk\build_apk.ps1 -Abi arm64-v8a
+.\tests\hello_xr\build_emulator.ps1 -Abi arm64-v8a -Graphics Vulkan
+.\tools\windows_android_emulator.ps1 -Action Install -Abi arm64-v8a -AppApk .\build-hello-xr-windows-arm64-v8a-vulkan\hello-xr-emulator.apk
+.\tools\test_vulkan_emulator.ps1 -Abi arm64-v8a -Api Vulkan2
+# Exercise the original XR_KHR_vulkan_enable interface too:
+.\tools\test_vulkan_emulator.ps1 -Abi arm64-v8a -Api Vulkan
+```
+
+For x86_64, use `-Abi x86_64` throughout; the sample output directory is
+`build-hello-xr-windows-vulkan`. The sample packages end in `.vulkan` and
+`.arm64.vulkan`, so they coexist with the GLES samples. The test temporarily
+sets the sample's `debug.xr.graphicsPlugin` override and restores it after
+startup; subsequent GLES launches retain their own default. It restarts the
+sample, requires Nvidia Vulkan rather than GLES/software rendering, verifies
+the selected extension entry points, and checks tracking and continuing stereo
+transmission. Logs are `build-windows-emulator/vulkan-<ABI>-<API>-smoke.log`.
+
+Supported scope:
+
+- Vulkan API 1.0-1.1; `R8G8B8A8_UNORM` and `R8G8B8A8_SRGB` color images.
+- Three images per swapchain, up to four array layers, one mip level, one face,
+  and sample count 1. Unsupported formats, multisampling and usage flags fail
+  explicitly. The sample owns its fallback depth images.
+- One opaque stereo projection layer. Independent eye swapchains and array
+  layers, crop rectangles, and scaling to at most 512x512 per eye are handled.
+- Depth swapchains/composition, storage images, protected/static swapchains,
+  additional composition layers, and zero-copy GPU sharing are not implemented.
+- Both x86_64 and translated ARM64 sample paths have been exercised. This does
+  not establish compatibility with arbitrary games or vendor-specific APIs.
+
+The first uncached staging allocation delivered about 43 stereo frames/sec;
+preferring CPU-cached coherent staging memory reduced readback from about
+14 ms to below 1 ms in the ARM64 sample. Observed delivery is roughly 78-90
+stereo frames/sec in five-second windows with the headset in standby. These
+are transport rates, not headset refresh rate or end-to-end latency.
+The headset wearer confirmed the ARM64 Vulkan cubes are upright, at the right
+distance, and smooth.
+
+The on-device regression test uses real Vulkan images and known pixel patterns
+to check UNORM/sRGB, both array layers, crop/downscale, bottom-up transport
+orientation, queued rendering synchronization and repeated image reuse:
+
+```powershell
+# First configure the x86_64 runtime with build_apk.ps1 -Abi x86_64.
+cmake -S . -B build-android-runtime-windows-x86_64/runtime -DAXRB_BUILD_VULKAN_SMOKE=ON
+cmake --build build-android-runtime-windows-x86_64/runtime --target axrb_vulkan_smoke
+$adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
+& $adb -s emulator-5580 push build-android-runtime-windows-x86_64/runtime/android-runtime/axrb_vulkan_smoke /data/local/tmp/axrb_vulkan_smoke
+& $adb -s emulator-5580 shell chmod 755 /data/local/tmp/axrb_vulkan_smoke
+& $adb -s emulator-5580 shell /data/local/tmp/axrb_vulkan_smoke
+```
 
 ## Verified on this PC
 
@@ -223,10 +290,8 @@ OpenXR bridge or `--serve-images` receiver. For a sustained transport check:
   runtime APK and Windows host together. The host still accepts legacy v1;
   the non-emulator Java proxy remains on the legacy path. The capture tool saves
   both eye PNGs and render-camera JSON for v2 frames.
-- AXRB's OpenXR Vulkan implementation is incomplete: advertising
-  `XR_KHR_vulkan_enable` currently does not provide a usable Vulkan swapchain
-  implementation. A hardware Vulkan device in Android is necessary but is not
-  sufficient to run Vulkan-only OpenXR games.
+- Vulkan color swapchains work within the scope documented above. A hardware
+  Vulkan device and working sample do not establish arbitrary game compatibility.
 - Both x86_64 and translated ARM64 GLES `hello_xr` samples work. 32-bit ARM,
   headset-specific APIs and arbitrary games are not validated.
 - A future low-latency Windows path needs host-side Gfxstream image access with

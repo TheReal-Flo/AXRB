@@ -4,7 +4,7 @@ Android Extended Reality Bridge.
 
 AXRB is an experimental bridge for running Android OpenXR applications inside a Linux Android container and forwarding their OpenXR runtime calls, tracking, and frame output to a PC OpenXR runtime such as SteamVR or Monado.
 
-The current prototype proves the loader/runtime integration path and a basic CPU frame transport path. It is not production-ready and it is not a 90 FPS renderer yet.
+The current prototype proves loader/runtime integration and stereo frame transport. The native Windows branch renders GLES and Vulkan samples on Nvidia hardware, including translated ARM64 applications. It is not production-ready.
 
 ## Native Windows / Nvidia branch
 
@@ -14,8 +14,10 @@ are described in [Windows Nvidia setup](docs/windows_nvidia_emulator.md).
 The ARM64-only GLES sample also runs through the emulator's bundled ARM64
 translator with Nvidia rendering and stereo frame delivery; see
 [ARM64 build and verification](docs/windows_nvidia_emulator.md#arm64-translation).
-The existing GLES frame transport still uses CPU readback; OpenXR Vulkan
-swapchains and arbitrary game compatibility remain unfinished.
+GLES and Vulkan color swapchains work with both x86_64 and translated ARM64
+samples. See [Vulkan setup and limits](docs/windows_nvidia_emulator.md#vulkan-rendering).
+Frame transport still uses CPU readback; arbitrary game compatibility remains
+unfinished.
 
 ## Goal
 
@@ -36,11 +38,12 @@ Primary development target:
 - Monado or SteamVR as the host OpenXR runtime
 - Vulkan external memory and dma-buf for the real frame path
 
-Current test environment:
+Current Windows branch test environment:
 
 - Windows host running SteamVR
-- WSL/Waydroid for the Android container side
-- TCP/local-socket CPU image transport for proof of concept
+- Native Android Emulator with WHPX and Gfxstream/Nvidia rendering
+- x86_64 and translated ARM64 GLES/Vulkan samples
+- TCP stereo image transport with CPU readback for proof of concept
 
 ## Current Status
 
@@ -65,7 +68,7 @@ Known limitations:
 - The current image path is for validation, not low-latency VR.
 - The Windows/WSL path is useful for development, but it is not the right target for zero-copy frame transport.
 - WSL/Waydroid currently reports Android Vulkan through SwiftShader/CPU on the tested setup, not hardware Vulkan.
-- Real 90 FPS requires the Linux GPU-sharing path: Vulkan external memory, dma-buf, and explicit sync.
+- The native Windows sample can approach 90 fps delivery, but low-latency zero-copy transport still needs GPU sharing or encoding with explicit synchronization.
 
 ## Repository Layout
 
