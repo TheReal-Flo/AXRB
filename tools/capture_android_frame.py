@@ -37,20 +37,31 @@ def main():
             header = read_exact(connection, 64)
             magic, version, kind, size, width, height, layers, fmt, bpp, _ = struct.unpack_from('<IHH7I', header)
             sequence, _, payload_size = struct.unpack_from('<QQQ', header, 40)
-            if (magic, kind, fmt, bpp) != (0x49585241, 2, 1, 4) or (version, size) not in ((1, 64), (2, 160)):
+            if (magic, kind, fmt, bpp) != (0x49585241, 2, 1, 4) or (version, size) not in ((1, 64), (2, 160), (4, 160)):
                 raise ValueError('Unsupported AXRB frame header')
             if not width or not height or not layers or payload_size != width * height * layers * 4 or payload_size > 128 * 1024 * 1024:
                 raise ValueError('Invalid image dimensions or payload size')
-            metadata = read_exact(connection, 96) if version == 2 else None
+            metadata = read_exact(connection, 96) if version in (2, 4) else None
             payload = read_exact(connection, payload_size)
     eye_bytes = width * height * 4
     write_png(args.output, width, height, payload[:eye_bytes])
-    if metadata:
+    if metadata and version == 4:
         count, reserved = struct.unpack_from('<II', metadata)
-        if count != 2 or reserved != 0 or layers != 2:
+        count &= 0x7fffffff
+        if count not in (1, 2) or reserved:
+            raise ValueError('Invalid quad metadata')
+        panels = [struct.unpack_from('<9fII', metadata, 8 + i * 44) for i in range(count)]
+        args.output.with_suffix('.json').write_text(json.dumps({'sequence': sequence, 'quads_pose_size_visibility_flags': panels}, indent=2))
+        if count == 2:
+            write_png(args.output.with_name(args.output.stem + '-panel2.png'), width, height, payload[eye_bytes:eye_bytes*2])
+        print(f'Captured {count} quad panels -> {args.output}')
+        return
+    if metadata:
+        count, layer_flags = struct.unpack_from('<II', metadata)
+        if count != 2 or layer_flags & ~7 or layers != 2:
             raise ValueError('Invalid stereo metadata')
         views = [struct.unpack_from('<11f', metadata, 8 + eye * 44) for eye in range(2)]
-        args.output.with_suffix('.json').write_text(json.dumps({'sequence': sequence, 'views_position_quaternion_fov': views}, indent=2))
+        args.output.with_suffix('.json').write_text(json.dumps({'sequence': sequence, 'layer_flags': layer_flags, 'views_position_quaternion_fov': views}, indent=2))
         right = args.output.with_name(args.output.stem + '-right.png')
         write_png(right, width, height, payload[eye_bytes:eye_bytes * 2])
         differences = sum(payload[i:i+3] != payload[eye_bytes+i:eye_bytes+i+3] for i in range(0, eye_bytes, 4))

@@ -1,4 +1,5 @@
 #include "image_transport.h"
+#include "windows_gpu_frame.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -151,14 +152,17 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
                 break;
             }
 
-            const bool projected = header.version == kProjectionImageFrameVersion;
+            const bool mixed = mixed_gpu_version(header.version);
+            const bool quads = header.version == kQuadImageFrameVersion || header.version == kQuadGpuFrameVersion || header.version == kMixedQuadGpuFrameVersion;
+            const bool gpu = header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion || mixed;
+            const bool projected = header.version == kProjectionImageFrameVersion || gpu || quads;
             const uint32_t expectedHeaderSize = sizeof(ImageFrameHeader) + (projected ? sizeof(ImageProjection) : 0);
-            if (header.magic != kImageFrameMagic ||
+            if ((mixed ? !valid_mixed_part(header.version, header.reserved) : header.reserved != 0) || header.magic != kImageFrameMagic ||
                 (header.version != kImageFrameVersion && !projected) ||
-                header.type != kImageFrameTypeRgba8 || header.header_size != expectedHeaderSize ||
+                header.type != (gpu ? kWindowsGpuFrameType : kImageFrameTypeRgba8) || header.header_size != expectedHeaderSize ||
                 header.format != kImageFrameFormatRgba8 ||
                 header.bytes_per_pixel != 4 || !header.width || !header.height ||
-                header.width > 4096 || header.height > 4096 || !header.layers || header.layers > 4 ||
+                !valid_render_extent(header.width, header.height) || !header.layers || header.layers > 4 ||
                 (projected && header.layers != 2)) {
                 std::fprintf(stderr, "AXRB Image TCP: invalid image header\n");
                 close_socket(client);
@@ -166,7 +170,7 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             }
 
             const uint64_t expected =
-                static_cast<uint64_t>(header.width) * header.height * header.layers * header.bytes_per_pixel;
+                gpu ? sizeof(WindowsGpuFrame) : static_cast<uint64_t>(header.width) * header.height * header.layers * header.bytes_per_pixel;
             if (header.payload_size != expected || header.payload_size > 128ull * 1024ull * 1024ull) {
                 std::fprintf(stderr, "AXRB Image TCP: invalid payload size %llu\n",
                     static_cast<unsigned long long>(header.payload_size));
@@ -176,7 +180,9 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
 
             std::vector<uint8_t> payload;
             ImageProjection projection{};
-            if (projected && (!recv_all(client, &projection, sizeof(projection)) || !valid_projection(projection))) {
+            if (projected && (!recv_all(client, &projection, sizeof(projection)) ||
+                !(quads ? valid_quads(projection) : valid_projection(projection)) ||
+                (mixed && quads && projection.quad_count() != 1))) {
                 std::fprintf(stderr, "AXRB Image TCP: invalid projection metadata\n");
                 close_socket(client);
                 break;
@@ -187,8 +193,17 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
                 break;
             }
 
-            if (callback) {
-                callback(header, projection, std::move(payload));
+            bool consumed = callback && callback(header, projection, std::move(payload));
+            if (gpu) {
+                uint64_t acknowledgment = consumed ? header.sequence : UINT64_MAX;
+                const char* bytes = reinterpret_cast<const char*>(&acknowledgment);
+                size_t sent = 0;
+                while (sent < sizeof(acknowledgment)) {
+                    int n = send(client, bytes + sent, static_cast<int>(sizeof(acknowledgment) - sent), 0);
+                    if (n <= 0) break;
+                    sent += n;
+                }
+                if (sent != sizeof(acknowledgment)) { close_socket(client); break; }
             }
 
             if (receivedFrames % 10 == 0) {

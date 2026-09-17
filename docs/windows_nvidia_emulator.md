@@ -284,7 +284,7 @@ OpenXR bridge or `--serve-images` receiver. For a sustained transport check:
   This restores binocular depth instead of duplicating the last released eye.
   Eye spacing is still a fixed 63 mm; headset-specific calibration is unfinished.
   Only one opaque stereo projection layer is supported, with matching output
-  dimensions capped at 512 by 512 per eye.
+  dimensions capped at 1024 by 1024 per eye.
 - Stereo TCP frames use image protocol v2: the 64-byte header is followed by
   96 bytes of projection metadata, then left/right RGBA layers. Update both the
   runtime APK and Windows host together. The host still accepts legacy v1;
@@ -307,3 +307,91 @@ OpenXR bridge or `--serve-images` receiver. For a sustained transport check:
 Using the existing emulator stack avoids having to integrate virtual graphics
 drivers into an unrelated Android VM. Waydroid retains its native Linux use
 case; its WSL software-rendering configuration is not this Windows path.
+
+## North Star compatibility (experimental)
+
+The existing ARM64 North Star 1.0.1 ovrport APK reaches the dock scene on
+Windows with Nvidia Vulkan rendering. No Unity source build is required.
+Use `tools/requirements-northstar.txt` to install the patcher's UnityPy dependency,
+then run:
+
+```powershell
+python -m pip install -r tools/requirements-northstar.txt
+python tools/patch_northstar_windows.py NorthStar-ovrport.apk NorthStar-windows-unsigned.apk
+```
+
+Zipalign and sign the output with Android SDK tools before installing it. The
+patcher preserves the input and rejects unknown native-library/settings hashes.
+It disables optional Meta audio metrics (unsupported JNI enumeration), makes
+Unity use regular Vulkan descriptor updates, disables Quest space warp, and
+selects Unity multi-pass stereo. Original texture assets are retained. Merely
+hiding the multiview extension does not select multi-pass and produced an empty
+left/right image in this build.
+
+Build/install the ARM64 runtime and current Windows host together. Runtime
+installation needs `adb install --no-incremental --force-queryable -r`; run
+`adb shell sync` after installation. Start the emulator with at least 4096 MB
+RAM, verify Nvidia rendering, start the host with `--serve-openxr 38490`, then:
+
+```powershell
+adb -s emulator-5580 shell am start -n com.meta.samples.NorthStar/com.meta.northstar.NorthStarActivity
+```
+
+Captured stereo images show the dock/ocean in both eyes. Observed delivery is
+approximately 20–28 fps at 512 by 512 per eye; this is not yet smooth VR.
+Force-stopping this game can crash the emulator's native graphics path; recovery
+currently requires restarting the emulator. Loading overlay submissions with
+multiple composition layers remain unsupported. These limitations mean this
+is an experimental compatibility result, not general Quest game support.
+
+Pose protocol v2 also carries controller buttons, trigger, squeeze and sticks;
+the decoder still accepts v1 poses. Windows maps physical SteamVR controllers
+to Touch-style inputs. The host prefers the floor-relative STAGE origin and
+falls back to LOCAL if unavailable. The user confirmed correct stereo and usable controllers in the headset.
+
+For recording, the current transport cap is 1024 by 1024 per eye (four times
+the previous pixel count). `protocol/image_frame.h` defines the shared
+`kTransportEyeDimension`; both the Android runtime and Windows host must be
+rebuilt when changing it. The Vulkan staging allocation and GPU blit targets
+use the same cap. Higher resolution increases readback and TCP traffic.
+
+## Desktop preview and game lifetime
+
+Launch an installed North Star session with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/run_windows_game.ps1
+```
+
+The host opens a resizable `North Star | AXRB` window showing the left eye.
+Its D3D11 preview copies the existing GPU texture, preserves aspect ratio with
+black bars, and uses nonblocking presentation. Minimizing it skips preview work.
+The preview is owned by the host process and cannot outlive it.
+
+The launcher monitors both the host and Android package. Closing the preview
+stops the game session; an Android process exit also closes the preview. If the
+launcher started the emulator, it shuts that emulator down with the game to
+avoid North Star's known force-stop/Gfxstream crash. With an already running
+emulator it stops only the requested Android package (the existing force-stop
+crash limitation still applies). Closing the launcher itself is not the normal
+shutdown path; close the preview instead.
+
+For another installed game, supply `-Package` and the matching
+`-Activity package/activity`. The launcher reads the default application label
+from the installed base APK using SDK `aapt2`, then adds ` | AXRB`. It temporarily
+pulls that APK and removes the copy after reading; Python and Android SDK
+build-tools are required. Missing or empty labels fall back to the package name.
+An explicit `-GameName` remains available as an optional override. Unicode and
+quoted labels are preserved.
+The default host executable is the Release build in `build-windows-nvidia`.
+Logs are in `build-windows-game`. Direct host mode accepts the title as its
+fourth argument, e.g. `--serve-openxr 38490 0 "North Star"`; use the launcher
+when Android process lifetime management is required.
+
+## Shared GPU texture transfer
+
+The Windows Vulkan path now supports GPU-only eye transfer through an optional
+host Vulkan layer. When built, the game launcher enables it for new emulator
+sessions. See [Windows shared GPU eye textures](windows_gpu_texture_transfer.md)
+for build commands, ownership/synchronization, fallback and measured results.
+The CPU/TCP pixel path described above remains the fallback and GLES path.

@@ -1,0 +1,49 @@
+@import "tailwindcss";
+@custom-variant dark (&:is(.dark *));
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--foreground);
+  --color-muted: var(--secondary);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--secondary);
+  --color-accent-foreground: var(--foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--foreground);
+  --color-destructive: #ef7777;
+  --color-border: var(--border);
+  --color-input: var(--border);
+  --color-ring: #a3a3a3;
+}
+:root {
+  font-family: "Segoe UI", sans-serif;
+  color-scheme: dark;
+  --background: #141414;
+  --foreground: #ededed;
+  --primary: #ededed;
+  --primary-foreground: #171717;
+  --secondary: #272727;
+  --muted-foreground: #a0a0a0;
+  --popover: #202020;
+  --border: #343434;
+}
+@layer base {
+  * { @apply border-border; }
+  body { @apply m-0 bg-background text-sm text-foreground antialiased; }
+  button, input, select { font: inherit; }
+  button:not(:disabled), [role="menuitem"]:not([data-disabled]) { cursor: pointer; }
+  :focus-visible { outline: 2px solid #aaa; outline-offset: 3px; }
+  ::selection { background: #505050; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #3b3b3b; border-radius: 4px; }
+}
+progress { appearance: none; height: 3px; width: 100%; overflow: hidden; border-radius: 2px; }
+progress::-webkit-progress-bar { background: #333; }
+progress::-webkit-progress-value { background: #ddd; }
+progress:indeterminate { background: #333; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

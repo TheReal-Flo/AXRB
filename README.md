@@ -8,6 +8,10 @@ The current prototype proves loader/runtime integration and stereo frame transpo
 
 ## Native Windows / Nvidia branch
 
+The Windows desktop launcher is in [launcher/](launcher/README.md). Run
+`powershell -ExecutionPolicy Bypass -File tools/run_launcher.ps1` for a local game
+library, Meta Quest storefront, APK/content downloads, and AXRB install/play controls.
+
 An experimental Android Emulator / Gfxstream path uses native Windows host GPU
 rendering, with no WSL. PowerShell build, launch and GPU-verification scripts
 are described in [Windows Nvidia setup](docs/windows_nvidia_emulator.md).

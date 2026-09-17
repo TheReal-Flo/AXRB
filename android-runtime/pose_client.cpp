@@ -73,10 +73,13 @@ void log_connect_failure(const char* host, int error)
 
 } // namespace
 
-const axrb::protocol::PoseFrame& PoseClient::latest_pose_frame()
+axrb::protocol::PoseFrame PoseClient::latest_pose_frame()
 {
     static axrb::protocol::PerfStats stats("pose-query");
     axrb::protocol::PerfScope scope(stats);
+    // Unreal polls from both game and render threads. A TCP record and its
+    // decoder must have one reader, including connection/close operations.
+    std::lock_guard lock(mutex_);
 #if defined(__ANDROID__)
     static const bool emulator = [] {
         char hardware[PROP_VALUE_MAX]{};
@@ -100,6 +103,7 @@ const axrb::protocol::PoseFrame& PoseClient::latest_pose_frame()
 #if defined(__ANDROID__)
 void PoseClient::set_android_context(JavaVM* vm, jobject context)
 {
+    std::lock_guard lock(mutex_);
     if (vm == nullptr || context == nullptr) {
         return;
     }
@@ -189,6 +193,7 @@ bool PoseClient::query_pose_broker()
         jmethodID getLong = env->GetMethodID(cursorClass, "getLong", "(I)J");
         jmethodID getFloat = env->GetMethodID(cursorClass, "getFloat", "(I)F");
         latest_.sequence = static_cast<uint64_t>(env->CallLongMethod(cursor, getLong, 0));
+        latest_.version = 1; // Legacy cursor exposes only head/controller poses.
         latest_.monotonic_time_ns = static_cast<uint64_t>(env->CallLongMethod(cursor, getLong, 1));
         latest_.hmd.x = env->CallFloatMethod(cursor, getFloat, 2);
         latest_.hmd.y = env->CallFloatMethod(cursor, getFloat, 3);

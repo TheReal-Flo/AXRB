@@ -48,6 +48,9 @@ Desktop.ini
 .DS_Store
 
 # Temporary files
+__pycache__/
+launcher/node_modules/
+launcher/dist/
 *.tmp
 *.temp
 *.bak

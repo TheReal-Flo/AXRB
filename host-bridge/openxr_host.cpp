@@ -1,5 +1,10 @@
 #include "openxr_host.h"
+#include "menu_shortcut.h"
 #include "perf_stats.h"
+#include "mirror_window.h"
+#include "windows_gpu_receiver.h"
+#include "debug_frame_capture.h"
+#include "windows_gpu_frame.h"
 
 #include "gpu_transport.h"
 #include "image_transport.h"
@@ -8,6 +13,7 @@
 
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -15,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <string_view>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -28,6 +35,7 @@
 #endif
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>
 #include <dxgi1_2.h>
 #endif
 
@@ -69,7 +77,7 @@ void print_usage()
 {
     std::fprintf(stderr, "Usage:\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve [port] [frames]\n");
-    std::fprintf(stderr, "  axrb-host-bridge --serve-openxr [port] [frames]\n");
+    std::fprintf(stderr, "  axrb-host-bridge --serve-openxr [port] [frames] [game-name]\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve-images [port] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --serve-gpu-fds [socket-path] [frames]\n");
     std::fprintf(stderr, "  axrb-host-bridge --video-recv-udp [port] [frames]\n");
@@ -278,8 +286,8 @@ struct HostImageFrame {
     void store(const axrb::protocol::ImageFrameHeader& newHeader, std::vector<uint8_t>&& newPixels,
                const axrb::protocol::ImageProjection& newProjection = {})
     {
-        static axrb::protocol::PerfStats stats("host-image-arrival");
-        stats.record(0);
+        static axrb::protocol::FrameIntervals stats("host-image-arrival");
+        stats.record();
         std::lock_guard<std::mutex> lock(mutex);
         header = newHeader;
         projection = newProjection;
@@ -325,6 +333,7 @@ public:
         if (localSpace_ != XR_NULL_HANDLE && destroySpace_ != nullptr) {
             destroySpace_(localSpace_);
         }
+        if (appLocalSpace_ != XR_NULL_HANDLE && destroySpace_) destroySpace_(appLocalSpace_);
 #if defined(_WIN32)
         if (projectionSwapchain_ != XR_NULL_HANDLE && destroySwapchain_ != nullptr) {
             destroySwapchain_(projectionSwapchain_);
@@ -337,6 +346,13 @@ public:
                 handSpace = XR_NULL_HANDLE;
             }
         }
+        for (auto tracker : handTrackers_) {
+            if (tracker && destroyHandTracker_) destroyHandTracker_(tracker);
+        }
+        for (XrSpace space : aimSpaces_) {
+            if (space != XR_NULL_HANDLE && destroySpace_) destroySpace_(space);
+        }
+        if (aimPoseAction_ != XR_NULL_HANDLE && destroyAction_) destroyAction_(aimPoseAction_);
         if (handPoseAction_ != XR_NULL_HANDLE && destroyAction_ != nullptr) {
             destroyAction_(handPoseAction_);
             handPoseAction_ = XR_NULL_HANDLE;
@@ -353,13 +369,13 @@ public:
         }
     }
 
-    bool initialize()
+    bool initialize(const std::string& gameName)
     {
         if (!loader_.load()) {
             return false;
         }
 
-        const char* extensions[] = {
+        std::vector<const char*> extensions = {
 #if defined(_WIN32)
             XR_KHR_D3D11_ENABLE_EXTENSION_NAME,
 #else
@@ -367,8 +383,29 @@ public:
             XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME,
 #endif
         };
+        PFN_xrVoidFunction enumerateRaw = nullptr;
+        loader_.getInstanceProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &enumerateRaw);
+        if (enumerateRaw) {
+            auto enumerate = reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(enumerateRaw);
+            uint32_t count = 0; enumerate(nullptr, 0, &count, nullptr);
+            std::vector<XrExtensionProperties> available(count, {XR_TYPE_EXTENSION_PROPERTIES});
+            if (enumerate(nullptr, count, &count, available.data()) == XR_SUCCESS) {
+                for (const auto& ext : available) {
+                    if (std::strcmp(ext.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME) == 0) handTrackingEnabled_ = true;
+                    if (std::strcmp(ext.extensionName, XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME) == 0) handDataSourceEnabled_ = true;
+                }
+            }
+        }
+        if (handTrackingEnabled_) {
+            extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+            if (handDataSourceEnabled_) extensions.push_back(XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME);
+        }
         XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
-        std::strncpy(instanceInfo.applicationInfo.applicationName, "AXRB Host Bridge", XR_MAX_APPLICATION_NAME_SIZE - 1);
+        std::string applicationName = gameName + " \xe2\x80\x93 AXRB";
+        size_t nameLength = (std::min)(applicationName.size(), size_t(XR_MAX_APPLICATION_NAME_SIZE - 1));
+        while (nameLength < applicationName.size() && nameLength &&
+               (static_cast<unsigned char>(applicationName[nameLength]) & 0xc0) == 0x80) --nameLength;
+        std::memcpy(instanceInfo.applicationInfo.applicationName, applicationName.data(), nameLength);
         instanceInfo.applicationInfo.applicationVersion = 1;
         std::strncpy(instanceInfo.applicationInfo.engineName, "AXRB", XR_MAX_ENGINE_NAME_SIZE - 1);
         instanceInfo.applicationInfo.engineVersion = 1;
@@ -377,8 +414,8 @@ public:
 #else
         instanceInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
 #endif
-        instanceInfo.enabledExtensionCount = sizeof(extensions) / sizeof(extensions[0]);
-        instanceInfo.enabledExtensionNames = extensions;
+        instanceInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+        instanceInfo.enabledExtensionNames = extensions.data();
 
         XrResult result = loader_.createInstance(&instanceInfo, &instance_);
         if (result != XR_SUCCESS) {
@@ -427,15 +464,22 @@ public:
             return false;
         }
 
-        if (!create_reference_space(XR_REFERENCE_SPACE_TYPE_LOCAL, &localSpace_) ||
-            !create_reference_space(XR_REFERENCE_SPACE_TYPE_VIEW, &viewSpace_)) {
+        // Android games commonly request STAGE/floor tracking. Keep the shared
+        // tracking world floor-relative when SteamVR provides a stage space.
+        const bool hasFloor = create_reference_space(XR_REFERENCE_SPACE_TYPE_STAGE, &localSpace_);
+        trackingSpaceType_ = hasFloor ? XR_REFERENCE_SPACE_TYPE_STAGE : XR_REFERENCE_SPACE_TYPE_LOCAL;
+        std::fprintf(stderr, "AXRB OpenXR: tracking origin=%s\n", hasFloor ? "STAGE (floor)" : "LOCAL");
+        if ((!hasFloor && !create_reference_space(XR_REFERENCE_SPACE_TYPE_LOCAL, &localSpace_)) ||
+            !create_reference_space(XR_REFERENCE_SPACE_TYPE_VIEW, &viewSpace_) ||
+            !create_reference_space(XR_REFERENCE_SPACE_TYPE_LOCAL, &appLocalSpace_)) {
             return false;
         }
 
 #if defined(_WIN32)
-        create_projection_swapchain();
+        if (!create_projection_swapchain()) return false;
 #endif
         initialize_controller_actions();
+        initialize_hand_tracking();
 
         std::fprintf(
             stderr,
@@ -449,13 +493,39 @@ public:
         return true;
     }
 
+    bool open_mirror(const std::string& gameName) {
+#if defined(_WIN32)
+        return mirror_.open(d3dDevice_.get(), gameName);
+#else
+        return true;
+#endif
+    }
+    bool pump_mirror() {
+#if defined(_WIN32)
+        return mirror_.pump();
+#else
+        return true;
+#endif
+    }
+
     axrb::protocol::PoseFrame make_frame(uint64_t sequence)
     {
         pump_events();
 
         axrb::protocol::PoseFrame frame = latest_frame(sequence);
+        frame.hmd_flags = frame.local_origin_flags = 0;
+        frame.controllers[0] = {};
+        frame.controllers[1] = {};
+        for (size_t hand = 0; hand < 2; ++hand) {
+            frame.grip_flags[hand] = frame.aim_flags[hand] = 0;
+            frame.aim_active[hand] = 0;
+        }
         frame.sequence = sequence;
         frame.monotonic_time_ns = monotonic_time_ns();
+#if defined(_WIN32)
+        frame.render_width = projectionWidth_;
+        frame.render_height = projectionHeight_;
+#endif
 
         if (!sessionRunning_) {
             publish_pose(frame);
@@ -478,9 +548,16 @@ public:
             if (result == XR_SUCCESS) {
                 frameDisplayTime = frameState.predictedDisplayTime;
                 locateTime = frameState.predictedDisplayTime;
+                if (frameState.shouldRender && axrb::protocol::valid_display_period(frameState.predictedDisplayPeriod)) {
+                    frame.display_period_ns = static_cast<uint32_t>(frameState.predictedDisplayPeriod);
+                }
 
                 XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
-                result = beginFrame_(session_, &beginInfo);
+                {
+                    static axrb::protocol::PerfStats stats("host-begin-frame");
+                    axrb::protocol::PerfScope scope(stats);
+                    result = beginFrame_(session_, &beginInfo);
+                }
                 if (result == XR_SUCCESS) {
                     beganFrame = true;
                 } else if (result == XR_ERROR_CALL_ORDER_INVALID) {
@@ -511,11 +588,44 @@ public:
         }
 
         XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+        XrSpaceLocation origin{XR_TYPE_SPACE_LOCATION};
+        if (!localOriginInitialized_) {
+            XrSpaceLocation initialHead{XR_TYPE_SPACE_LOCATION};
+            if (locateSpace_(viewSpace_, localSpace_, locateTime, &initialHead) == XR_SUCCESS &&
+                (initialHead.locationFlags & 3) == 3) {
+                XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+                info.referenceSpaceType = trackingSpaceType_;
+                // Correct eye height without recentering heading or horizontal
+                // position from a headset that may still be resting on a desk.
+                // Use the common tracking axes: native LOCAL may be rotated
+                // relative to STAGE by the runtime's seated calibration.
+                info.poseInReferenceSpace.orientation.w = 1.0f;
+                info.poseInReferenceSpace.position.y = initialHead.pose.position.y;
+                XrSpace startupLocal = XR_NULL_HANDLE;
+                if (createReferenceSpace_(session_, &info, &startupLocal) == XR_SUCCESS) {
+                    destroySpace_(appLocalSpace_);
+                    appLocalSpace_ = startupLocal;
+                    localOriginInitialized_ = true;
+                }
+            }
+        }
+        if (localOriginInitialized_ && locateSpace_(appLocalSpace_, localSpace_, locateTime, &origin) == XR_SUCCESS &&
+            (origin.locationFlags & 3) == 3) {
+            frame.local_origin = to_protocol_pose(origin.pose);
+            frame.local_origin_flags = static_cast<uint32_t>(origin.locationFlags);
+            if (!reportedLocalOrigin_) {
+                std::fprintf(stderr, "AXRB OpenXR: LOCAL origin in tracking world=(%.3f %.3f %.3f) q=(%.4f %.4f %.4f %.4f)\n",
+                    origin.pose.position.x, origin.pose.position.y, origin.pose.position.z,
+                    origin.pose.orientation.x, origin.pose.orientation.y, origin.pose.orientation.z, origin.pose.orientation.w);
+                reportedLocalOrigin_ = true;
+            }
+        }
         XrResult result = locateSpace_(viewSpace_, localSpace_, locateTime, &location);
         if (result == XR_SUCCESS &&
             (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
             (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
             frame.hmd = to_protocol_pose(location.pose);
+            frame.hmd_flags = static_cast<uint32_t>(location.locationFlags);
             if (sequence % 90 == 0) {
                 std::fprintf(
                     stderr,
@@ -528,18 +638,29 @@ public:
         }
 
         locate_controller_spaces(frame, locateTime, sequence);
+        locate_hand_joints(frame, locateTime, sequence);
         publish_pose(frame);
 
         if (beganFrame) {
             std::array<XrCompositionLayerProjectionView, 2> projectionViews{};
             XrCompositionLayerProjection projectionLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-            const XrCompositionLayerBaseHeader* layers[1]{};
+            std::array<XrCompositionLayerQuad, axrb::protocol::kMaxCompositionLayers> quadLayers{};
+            const XrCompositionLayerBaseHeader* layers[axrb::protocol::kMaxCompositionLayers]{};
+            bool mixedProjection = false;
             uint32_t layerCount = 0;
 #if defined(_WIN32)
             if (projectionSwapchain_ != XR_NULL_HANDLE &&
-                update_projection_layer(locateTime, projectionViews, projectionLayer)) {
-                layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
-                layerCount = 1;
+                update_projection_layer(locateTime, projectionViews, projectionLayer, quadLayers, layerCount, mixedProjection)) {
+                if (layerCount) {
+                    const uint32_t offset = mixedProjection ? 1 : 0;
+                    if (mixedProjection) layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+                    for (uint32_t i = 0; i < layerCount; ++i)
+                        layers[offset + i] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayers[i]);
+                    layerCount += offset;
+                } else {
+                    layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+                    layerCount = 1;
+                }
             }
 #endif
 
@@ -548,7 +669,11 @@ public:
             endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             endInfo.layerCount = layerCount;
             endInfo.layers = layerCount > 0 ? layers : nullptr;
-            result = endFrame_(session_, &endInfo);
+            {
+                static axrb::protocol::PerfStats stats("host-end-frame");
+                axrb::protocol::PerfScope scope(stats);
+                result = endFrame_(session_, &endInfo);
+            }
             if (result != XR_SUCCESS) {
                 std::fprintf(stderr, "AXRB OpenXR: xrEndFrame failed: %s (%d)\n", xr_result_name(result), result);
                 useFrameLoop_ = false;
@@ -565,6 +690,62 @@ public:
         frame.sequence = sequence;
         frame.monotonic_time_ns = monotonic_time_ns();
         return frame;
+    }
+
+    // Receive on the image thread, independently of the OpenXR compositor clock.
+    // The same lock protects cross-device cache ownership and its render poses.
+    bool receive_image(const axrb::protocol::ImageFrameHeader& header,
+                       const axrb::protocol::ImageProjection& projection,
+                       std::vector<uint8_t>&& pixels) {
+#if defined(_WIN32)
+        static axrb::protocol::PerfStats stats("host-receive-image");
+        axrb::protocol::PerfScope scope(stats);
+        const auto lockStart = std::chrono::steady_clock::now();
+        std::lock_guard lock(gpuMutex_);
+        static axrb::protocol::PerfStats lockStats("host-receive-lock");
+        lockStats.record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lockStart).count());
+        if (axrb::protocol::mixed_gpu_version(header.version)) {
+            if (!axrb::protocol::valid_mixed_part(header.version, header.reserved) ||
+                pixels.size() != sizeof(axrb::protocol::WindowsGpuFrame) ||
+                header.width > projectionWidth_ || header.height > projectionHeight_) return false;
+            const uint32_t count = header.reserved >> 16, index = header.reserved & 0xffff;
+            if (index == 0) { pendingMixedBank_ = 1 - activeMixedBank_; pendingMixedCount_ = count; pendingMixedIndex_ = 0; pendingMixedSequence_ = header.sequence; }
+            if (count != pendingMixedCount_ || index != pendingMixedIndex_ || header.sequence != pendingMixedSequence_) return false;
+            auto& part = mixedFrames_[pendingMixedBank_][index];
+            axrb::protocol::WindowsGpuFrame gpu{}; std::memcpy(&gpu, pixels.data(), sizeof(gpu));
+            if (!part.receiver.receive(receiveDevice_.get(), receiveContext_.get(), gpu, header.sequence,
+                    header.width, header.height, static_cast<DXGI_FORMAT>(projectionFormat_))) { pendingMixedCount_ = 0; return false; }
+            part.header = header; part.projection = projection;
+            ++pendingMixedIndex_; ++pendingMixedSequence_;
+            if (pendingMixedIndex_ == count) {
+                activeMixedBank_ = pendingMixedBank_; activeMixedCount_ = count;
+                auto complete = mixedFrames_[activeMixedBank_][0].header;
+                complete.sequence = header.sequence; // Publish only after all GPU copies complete.
+                imageFrame_->store(complete, std::move(pixels), mixedFrames_[activeMixedBank_][0].projection);
+                pendingMixedCount_ = 0;
+            }
+            return true;
+        }
+        if ((header.version == axrb::protocol::kWindowsGpuFrameVersion || header.version == axrb::protocol::kQuadGpuFrameVersion)) {
+            if (pixels.size() != sizeof(axrb::protocol::WindowsGpuFrame) ||
+                header.width > projectionWidth_ || header.height > projectionHeight_) return false;
+            axrb::protocol::WindowsGpuFrame gpu{};
+            std::memcpy(&gpu, pixels.data(), sizeof(gpu));
+            if (!gpuReceiver_.receive(receiveDevice_.get(), receiveContext_.get(), gpu,
+                    header.sequence, header.width, header.height,
+                    static_cast<DXGI_FORMAT>(projectionFormat_))) {
+                // A failed import may invalidate the receiver cache. Do not
+                // display old metadata against a partial or missing cache.
+                std::lock_guard frameLock(imageFrame_->mutex);
+                imageFrame_->hasFrame = false;
+                return false;
+            }
+        }
+#else
+        if ((header.version == axrb::protocol::kWindowsGpuFrameVersion || header.version == axrb::protocol::kQuadGpuFrameVersion)) return false;
+#endif
+        imageFrame_->store(header, std::move(pixels), projection);
+        return true; // ACK only after the GPU copy and metadata publication.
     }
 
     bool drives_frame_loop() const { return sessionRunning_ && useFrameLoop_; }
@@ -593,6 +774,7 @@ private:
     {
         return load_func("xrDestroyInstance", &destroyInstance_) &&
             load_func("xrGetSystem", &getSystem_) &&
+            load_func("xrEnumerateViewConfigurationViews", &enumerateViewConfigurationViews_) &&
             load_func("xrCreateSession", &createSession_) &&
             load_func("xrDestroySession", &destroySession_) &&
             load_func("xrCreateReferenceSpace", &createReferenceSpace_) &&
@@ -614,7 +796,10 @@ private:
             load_func("xrAttachSessionActionSets", &attachSessionActionSets_) &&
             load_func("xrCreateActionSpace", &createActionSpace_) &&
             load_func("xrSyncActions", &syncActions_) &&
-            load_func("xrGetActionStatePose", &getActionStatePose_)
+            load_func("xrGetActionStatePose", &getActionStatePose_) &&
+            load_func("xrGetActionStateBoolean", &getActionStateBoolean_) &&
+            load_func("xrGetActionStateFloat", &getActionStateFloat_) &&
+            load_func("xrGetActionStateVector2f", &getActionStateVector2f_)
 #if defined(_WIN32)
             && load_func("xrEnumerateSwapchainFormats", &enumerateSwapchainFormats_)
             && load_func("xrCreateSwapchain", &createSwapchain_)
@@ -726,10 +911,25 @@ private:
             return false;
         }
 
+        // SteamVR also uses the binding device's immediate context during
+        // xrEndFrame. Protect those accesses as well as our own copy commands.
+        ComPtr<ID3D11Multithread> multithread;
+        if (FAILED(d3dContext_.get()->QueryInterface(__uuidof(ID3D11Multithread),
+                reinterpret_cast<void**>(multithread.put())))) return false;
+        multithread.get()->SetMultithreadProtected(TRUE);
+
         if (createdFeatureLevel < requirements.minFeatureLevel) {
             std::fprintf(stderr, "AXRB OpenXR: D3D11 feature level is below runtime requirement\n");
             return false;
         }
+
+        // Reception has its own immediate context: SteamVR can hold its
+        // binding context while pacing xrEndFrame without delaying Android.
+        hr = D3D11CreateDevice(selectedAdapter.get(), D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, featureLevels,
+            sizeof(featureLevels) / sizeof(featureLevels[0]), D3D11_SDK_VERSION,
+            receiveDevice_.put(), nullptr, receiveContext_.put());
+        if (FAILED(hr)) return false;
 
         std::fprintf(stderr, "AXRB OpenXR: D3D11 graphics binding ready\n");
         return true;
@@ -737,6 +937,24 @@ private:
 
     bool create_projection_swapchain()
     {
+        uint32_t viewCount = 0;
+        if (enumerateViewConfigurationViews_(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                0, &viewCount, nullptr) != XR_SUCCESS || viewCount != 2) return false;
+        std::array<XrViewConfigurationView, 2> configViews{{{XR_TYPE_VIEW_CONFIGURATION_VIEW}, {XR_TYPE_VIEW_CONFIGURATION_VIEW}}};
+        if (enumerateViewConfigurationViews_(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                2, &viewCount, configViews.data()) != XR_SUCCESS) return false;
+        projectionWidth_ = projectionHeight_ = 0;
+        // The stereo transport uses equal-size array slices. Accommodate both
+        // recommendations if the runtime recommends asymmetric view sizes.
+        for (const auto& view : configViews) {
+            projectionWidth_ = (std::max)(projectionWidth_, view.recommendedImageRectWidth);
+            projectionHeight_ = (std::max)(projectionHeight_, view.recommendedImageRectHeight);
+        }
+        if (!axrb::protocol::valid_render_extent(projectionWidth_, projectionHeight_)) {
+            std::fprintf(stderr, "AXRB OpenXR: unsupported recommended eye extent %ux%u\n", projectionWidth_, projectionHeight_);
+            return false;
+        }
+        std::fprintf(stderr, "AXRB OpenXR: runtime recommended stereo extent %ux%u\n", projectionWidth_, projectionHeight_);
         uint32_t formatCount = 0;
         XrResult result = enumerateSwapchainFormats_(session_, 0, &formatCount, nullptr);
         if (result != XR_SUCCESS || formatCount == 0) {
@@ -778,13 +996,13 @@ private:
         projectionFormat_ = selectedFormat;
 
         XrSwapchainCreateInfo swapchainInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-        swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
         swapchainInfo.format = selectedFormat;
         swapchainInfo.sampleCount = 1;
         swapchainInfo.width = projectionWidth_;
         swapchainInfo.height = projectionHeight_;
         swapchainInfo.faceCount = 1;
-        swapchainInfo.arraySize = 2;
+        swapchainInfo.arraySize = projectionArraySize_;
         swapchainInfo.mipCount = 1;
 
         result = createSwapchain_(session_, &swapchainInfo, &projectionSwapchain_);
@@ -802,8 +1020,13 @@ private:
 
         projectionImages_.resize(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
         uploadedAndroidSequenceByImage_.assign(imageCount, UINT64_MAX);
+        uploadedGpuSessionByImage_.assign(imageCount, 0);
         uploadedProjectionByImage_.resize(imageCount);
-        uploadedExtentByImage_.resize(imageCount, {512, 512});
+        uploadedMixedQuads_.resize(imageCount);
+        uploadedMixedExtents_.resize(imageCount);
+        uploadedMixedCounts_.assign(imageCount, 0);
+        uploadedMixedTimes_.assign(imageCount, 0);
+        uploadedExtentByImage_.resize(imageCount, {static_cast<int32_t>(projectionWidth_), static_cast<int32_t>(projectionHeight_)});
         result = enumerateSwapchainImages_(
             projectionSwapchain_,
             imageCount,
@@ -826,10 +1049,32 @@ private:
     bool update_projection_layer(
         XrTime displayTime,
         std::array<XrCompositionLayerProjectionView, 2>& projectionViews,
-        XrCompositionLayerProjection& projectionLayer)
+        XrCompositionLayerProjection& projectionLayer,
+        std::array<XrCompositionLayerQuad, axrb::protocol::kMaxCompositionLayers>& quadLayers,
+        uint32_t& quadCount, bool& mixedProjection)
     {
         static axrb::protocol::PerfStats stats("host-projection");
         axrb::protocol::PerfScope scope(stats);
+        // Grow only when an actual complete batch needs more texture slices.
+        // Ordinary stereo games keep their original two-slice allocation.
+        {
+            std::lock_guard lock(gpuMutex_);
+            axrb::protocol::ImageFrameHeader header{};
+            axrb::protocol::ImageProjection composition{};
+            std::shared_ptr<const std::vector<uint8_t>> payload;
+            if (imageFrame_ && imageFrame_->snapshot(&header, &payload, &composition) && axrb::protocol::mixed_gpu_version(header.version)) {
+                const uint32_t needed = activeMixedCount_ + (composition.view_count == 2 ? 1 : 0);
+                if (needed > projectionArraySize_) {
+                    d3dContext_.get()->Flush();
+                    if (destroySwapchain_(projectionSwapchain_) != XR_SUCCESS) return false;
+                    projectionSwapchain_ = XR_NULL_HANDLE;
+                    projectionImages_.clear();
+                    projectionArraySize_ = needed;
+                    if (!create_projection_swapchain()) return false;
+                    std::fprintf(stderr, "AXRB OpenXR: expanded compositor to %u slices for %u layers\n", needed, activeMixedCount_);
+                }
+            }
+        }
         uint32_t imageIndex = 0;
         XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         XrResult result = acquireSwapchainImage_(projectionSwapchain_, &acquireInfo, &imageIndex);
@@ -850,6 +1095,28 @@ private:
         result = releaseSwapchainImage_(projectionSwapchain_, &releaseInfo);
         if (result != XR_SUCCESS) {
             return false;
+        }
+
+        const auto& composition = uploadedProjectionByImage_[imageIndex];
+        const bool mixedBatch = uploadedMixedCounts_[imageIndex] != 0;
+        mixedProjection = mixedBatch && composition.view_count == 2;
+        quadCount = mixedBatch ? uploadedMixedCounts_[imageIndex] : composition.quad_count();
+        if (quadCount) {
+            for (uint32_t i = 0; i < quadCount; ++i) {
+                const auto& source = mixedBatch ? uploadedMixedQuads_[imageIndex][i] : composition.quads[i];
+                auto& quad = quadLayers[i];
+                quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+                quad.space = localSpace_;
+                quad.layerFlags = source.layer_flags;
+                quad.eyeVisibility = static_cast<XrEyeVisibility>(source.eye_visibility);
+                quad.pose.position = {source.pose.x, source.pose.y, source.pose.z};
+                quad.pose.orientation = {source.pose.qx, source.pose.qy, source.pose.qz, source.pose.qw};
+                quad.size = {source.width, source.height};
+                quad.subImage.swapchain = projectionSwapchain_;
+                quad.subImage.imageArrayIndex = mixedBatch ? i + (mixedProjection ? 2 : 0) : i;
+                quad.subImage.imageRect.extent = mixedBatch ? uploadedMixedExtents_[imageIndex][i] : uploadedExtentByImage_[imageIndex];
+            }
+            if (!mixedProjection) return true;
         }
 
         XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
@@ -894,6 +1161,7 @@ private:
         }
 
         projectionLayer.space = localSpace_;
+        projectionLayer.layerFlags = uploadedProjectionByImage_[imageIndex].layer_flags;
         projectionLayer.viewCount = 2;
         projectionLayer.views = projectionViews.data();
         if (!reportedProjectionSubmit_) {
@@ -905,6 +1173,10 @@ private:
 
     void fill_projection_texture(ID3D11Texture2D* texture, uint32_t imageIndex)
     {
+        const auto lockStart = std::chrono::steady_clock::now();
+        std::lock_guard lock(gpuMutex_);
+        static axrb::protocol::PerfStats lockStats("host-projection-lock");
+        lockStats.record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lockStart).count());
         if (texture == nullptr || d3dContext_.get() == nullptr) {
             return;
         }
@@ -955,9 +1227,61 @@ private:
         if (header.width == 0 || header.height == 0 || header.layers == 0 || pixels == nullptr || pixels->empty()) {
             return false;
         }
-        if (header.sequence == uploadedAndroidSequenceByImage_[imageIndex]) {
+        if (axrb::protocol::mixed_gpu_version(header.version)) {
+            if (activeMixedCount_ < 2 || activeMixedCount_ > axrb::protocol::kMaxCompositionLayers ||
+                activeMixedCount_ + (projection.view_count == 2 ? 1u : 0u) > projectionArraySize_) return false;
+            if (uploadedAndroidSequenceByImage_[imageIndex] != header.sequence || uploadedMixedTimes_[imageIndex] != header.monotonic_time_ns || !uploadedMixedCounts_[imageIndex]) {
+                for (uint32_t i = 0; i < activeMixedCount_; ++i) {
+                    auto& part = mixedFrames_[activeMixedBank_][i];
+                    const bool scene = projection.view_count == 2;
+                    const uint32_t slice = scene && i ? i + 1 : i;
+                    if (!part.receiver.copy_to(d3dContext_.get(), texture, slice, scene && i == 0 ? 2 : 1)) return false;
+                    const uint32_t firstQuad = projection.view_count == 2 ? 1 : 0;
+                    if (i >= firstQuad) {
+                        uploadedMixedQuads_[imageIndex][i - firstQuad] = part.projection.quads[0];
+                        uploadedMixedExtents_[imageIndex][i - firstQuad] = {static_cast<int32_t>(part.header.width), static_cast<int32_t>(part.header.height)};
+                    }
+                }
+                uploadedProjectionByImage_[imageIndex] = projection;
+                uploadedExtentByImage_[imageIndex] = {static_cast<int32_t>(header.width), static_cast<int32_t>(header.height)};
+                uploadedAndroidSequenceByImage_[imageIndex] = header.sequence;
+                uploadedGpuSessionByImage_[imageIndex] = 0;
+                uploadedMixedCounts_[imageIndex] = activeMixedCount_ - (projection.view_count == 2 ? 1 : 0);
+                uploadedMixedTimes_[imageIndex] = header.monotonic_time_ns;
+            }
+            mirror_.present(d3dContext_.get(), texture, header.width, header.height, static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
+            debug_capture_frame(d3dContext_.get(), texture, header.width, header.height, header.sequence);
             return true;
         }
+        uploadedMixedCounts_[imageIndex] = 0;
+        if ((header.version == axrb::protocol::kWindowsGpuFrameVersion || header.version == axrb::protocol::kQuadGpuFrameVersion)) {
+            if (pixels->size() != sizeof(axrb::protocol::WindowsGpuFrame)) return false;
+            axrb::protocol::WindowsGpuFrame gpu{};
+            std::memcpy(&gpu, pixels->data(), sizeof(gpu));
+            if (uploadedGpuSessionByImage_[imageIndex] == gpu.session &&
+                uploadedAndroidSequenceByImage_[imageIndex] == header.sequence &&
+                uploadedExtentByImage_[imageIndex].width == static_cast<int32_t>(header.width) &&
+                uploadedExtentByImage_[imageIndex].height == static_cast<int32_t>(header.height)) {
+                mirror_.present(d3dContext_.get(), texture, header.width, header.height,
+                    static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
+                return true;
+            }
+            if (!gpuReceiver_.copy_to(d3dContext_.get(), texture)) return false;
+            uploadedGpuSessionByImage_[imageIndex] = gpu.session;
+            uploadedAndroidSequenceByImage_[imageIndex] = header.sequence;
+            uploadedProjectionByImage_[imageIndex] = projection;
+            uploadedExtentByImage_[imageIndex] = {static_cast<int32_t>(header.width), static_cast<int32_t>(header.height)};
+            mirror_.present(d3dContext_.get(), texture, header.width, header.height, static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
+            if (projection.view_count == 2) debug_capture_frame(d3dContext_.get(), texture, header.width, header.height, header.sequence);
+            if (!reportedGpuImage_) { std::fprintf(stderr, "AXRB GPU: shared Windows textures active; no pixel TCP transfer\n"); reportedGpuImage_ = true; }
+            return true;
+        }
+        if (header.sequence == uploadedAndroidSequenceByImage_[imageIndex]) {
+            mirror_.present(d3dContext_.get(), texture, uploadedExtentByImage_[imageIndex].width,
+                uploadedExtentByImage_[imageIndex].height, static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
+            return true;
+        }
+        uploadedGpuSessionByImage_[imageIndex] = 0;
         if (projection.view_count == 2 && (header.width > projectionWidth_ || header.height > projectionHeight_)) {
             return false; // Cropping here would change the angular scale.
         }
@@ -1023,6 +1347,7 @@ private:
                 uploadStride * header.height);
         }
 
+        mirror_.present(d3dContext_.get(), texture, copyWidth, copyHeight, static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
         if (!reportedAndroidImageSubmit_) {
             std::fprintf(
                 stderr,
@@ -1070,6 +1395,51 @@ private:
         return true;
     }
 
+    enum InputAction { Trigger, Squeeze, Stick, Primary, Secondary, Menu, StickPress,
+                       PrimaryContact, SecondaryContact, TriggerContact, StickContact, ThumbrestContact, InputCount };
+
+    void initialize_hand_tracking() {
+        if (!handTrackingEnabled_ || !load_func("xrCreateHandTrackerEXT", &createHandTracker_) ||
+            !load_func("xrDestroyHandTrackerEXT", &destroyHandTracker_) ||
+            !load_func("xrLocateHandJointsEXT", &locateHandJoints_)) return;
+        for (size_t hand = 0; hand < 2; ++hand) {
+            XrHandTrackingDataSourceEXT sources[] = {XR_HAND_TRACKING_DATA_SOURCE_UNOBSTRUCTED_EXT, XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT};
+            XrHandTrackingDataSourceInfoEXT sourceInfo{XR_TYPE_HAND_TRACKING_DATA_SOURCE_INFO_EXT};
+            sourceInfo.requestedDataSourceCount = 2; sourceInfo.requestedDataSources = sources;
+            XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+            info.hand = hand == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+            info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+            if (handDataSourceEnabled_) info.next = &sourceInfo;
+            auto result = createHandTracker_(session_, &info, &handTrackers_[hand]);
+            std::fprintf(stderr, "AXRB Hands: create hand=%zu result=%d\n", hand, result);
+        }
+    }
+
+    void locate_hand_joints(axrb::protocol::PoseFrame& frame, XrTime time, uint64_t sequence) {
+        frame.hands[0] = {}; frame.hands[1] = {};
+        frame.hand_tracking_supported = handTrackers_[0] != XR_NULL_HANDLE && handTrackers_[1] != XR_NULL_HANDLE;
+        for (size_t hand = 0; hand < 2; ++hand) {
+            if (!handTrackers_[hand]) continue;
+            XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT]{};
+            XrHandTrackingDataSourceStateEXT source{XR_TYPE_HAND_TRACKING_DATA_SOURCE_STATE_EXT};
+            XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+            locations.jointCount = XR_HAND_JOINT_COUNT_EXT; locations.jointLocations = joints;
+            if (handDataSourceEnabled_) locations.next = &source;
+            XrHandJointsLocateInfoEXT info{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+            info.baseSpace = localSpace_; info.time = time;
+            const auto result = locateHandJoints_(handTrackers_[hand], &info, &locations);
+            auto& target = frame.hands[hand];
+            if (result == XR_SUCCESS && locations.isActive) {
+                target.active = 1;
+                target.source = source.isActive ? static_cast<uint32_t>(source.dataSource) : 0;
+                for (size_t joint = 0; joint < XR_HAND_JOINT_COUNT_EXT; ++joint) {
+                    target.joints[joint] = {joints[joint].locationFlags, to_protocol_pose(joints[joint].pose), joints[joint].radius};
+                }
+            }
+            if (sequence % 360 == 0) std::fprintf(stderr, "AXRB Hands: hand=%zu active=%u source=%u result=%d\n", hand, target.active, target.source, result);
+        }
+    }
+
     void initialize_controller_actions()
     {
         if (!string_to_path("/user/hand/left", &handSubactionPaths_[0]) ||
@@ -1098,6 +1468,23 @@ private:
         if (result != XR_SUCCESS) {
             std::fprintf(stderr, "AXRB OpenXR: xrCreateAction(hand_pose) failed: %s (%d)\n", xr_result_name(result), result);
             return;
+        }
+
+        std::strncpy(actionInfo.actionName, "aim_pose", XR_MAX_ACTION_NAME_SIZE - 1);
+        std::strncpy(actionInfo.localizedActionName, "Aim pose", XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+        if (createAction_(actionSet_, &actionInfo, &aimPoseAction_) != XR_SUCCESS) return;
+
+        constexpr const char* inputNames[] = {"trigger", "squeeze", "stick", "primary", "secondary", "menu",
+            "stick_press", "primary_touch", "secondary_touch", "trigger_touch", "stick_touch", "thumbrest_touch"};
+        for (size_t i = 0; i < InputCount; ++i) {
+            actionInfo.actionType = i <= Squeeze ? XR_ACTION_TYPE_FLOAT_INPUT :
+                i == Stick ? XR_ACTION_TYPE_VECTOR2F_INPUT : XR_ACTION_TYPE_BOOLEAN_INPUT;
+            std::snprintf(actionInfo.actionName, sizeof(actionInfo.actionName), "%s", inputNames[i]);
+            std::snprintf(actionInfo.localizedActionName, sizeof(actionInfo.localizedActionName), "%s", inputNames[i]);
+            if (createAction_(actionSet_, &actionInfo, &inputActions_[i]) != XR_SUCCESS) {
+                std::fprintf(stderr, "AXRB OpenXR: cannot create input action %s\n", inputNames[i]);
+                return;
+            }
         }
 
         suggest_pose_bindings("/interaction_profiles/oculus/touch_controller", "/input/grip/pose");
@@ -1130,6 +1517,13 @@ private:
             }
         }
 
+        for (size_t i = 0; i < aimSpaces_.size(); ++i) {
+            XrActionSpaceCreateInfo info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+            info.action = aimPoseAction_; info.subactionPath = handSubactionPaths_[i];
+            info.poseInActionSpace.orientation.w = 1;
+            if (createActionSpace_(session_, &info, &aimSpaces_[i]) != XR_SUCCESS) return;
+        }
+
         controllerActionsReady_ = handSpaces_[0] != XR_NULL_HANDLE || handSpaces_[1] != XR_NULL_HANDLE;
         if (controllerActionsReady_) {
             std::fprintf(stderr, "AXRB OpenXR: controller pose actions ready\n");
@@ -1152,13 +1546,43 @@ private:
         std::snprintf(leftBindingText, sizeof(leftBindingText), "/user/hand/left%s", poseInputSuffix);
         std::snprintf(rightBindingText, sizeof(rightBindingText), "/user/hand/right%s", poseInputSuffix);
 
-        std::array<XrActionSuggestedBinding, 2> bindings{};
+        std::vector<XrActionSuggestedBinding> bindings(2);
         if (!string_to_path(leftBindingText, &bindings[0].binding) ||
             !string_to_path(rightBindingText, &bindings[1].binding)) {
             return;
         }
         bindings[0].action = handPoseAction_;
         bindings[1].action = handPoseAction_;
+
+        for (const char* hand : {"left", "right"}) {
+            XrPath path = XR_NULL_PATH;
+            const std::string name = std::string("/user/hand/") + hand + "/input/aim/pose";
+            if (string_to_path(name.c_str(), &path)) bindings.push_back({aimPoseAction_, path});
+        }
+        const bool touch = std::strstr(interactionProfilePath, "oculus") != nullptr;
+        const bool vive = std::strstr(interactionProfilePath, "vive") != nullptr;
+        for (size_t hand = 0; hand < 2; ++hand) {
+            const char* primary = touch && hand == 0 ? "x" : "a";
+            const char* secondary = touch && hand == 0 ? "y" : "b";
+            std::array<std::string, InputCount> components{
+                "trigger/value", vive ? "squeeze/click" : "squeeze/value",
+                vive ? "trackpad" : "thumbstick",
+                vive ? "" : std::string(primary) + "/click",
+                vive ? "" : std::string(secondary) + "/click",
+                vive || (touch && hand == 0) ? "menu/click" : "",
+                vive ? "trackpad/click" : "thumbstick/click",
+                vive ? "" : std::string(primary) + "/touch",
+                vive ? "" : std::string(secondary) + "/touch",
+                vive ? "" : "trigger/touch",
+                vive ? "trackpad/touch" : "thumbstick/touch",
+                touch ? "thumbrest/touch" : ""};
+            for (size_t i = 0; i < InputCount; ++i) {
+                if (components[i].empty()) continue;
+                const std::string path = std::string(hand == 0 ? "/user/hand/left/input/" : "/user/hand/right/input/") + components[i];
+                XrPath binding = XR_NULL_PATH;
+                if (string_to_path(path.c_str(), &binding)) bindings.push_back({inputActions_[i], binding});
+            }
+        }
 
         XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         suggested.interactionProfile = profilePath;
@@ -1189,9 +1613,11 @@ private:
         syncInfo.activeActionSets = &activeActionSet;
         XrResult result = syncActions_(session_, &syncInfo);
         if (result == XR_SESSION_NOT_FOCUSED) {
+            menuShortcut_.reset();
             return;
         }
         if (result != XR_SUCCESS) {
+            menuShortcut_.reset();
             if (!reportedSyncFailure_) {
                 std::fprintf(stderr, "AXRB OpenXR: xrSyncActions failed: %s (%d)\n", xr_result_name(result), result);
                 reportedSyncFailure_ = true;
@@ -1206,6 +1632,17 @@ private:
             }
 
             XrActionStateGetInfo stateInfo{XR_TYPE_ACTION_STATE_GET_INFO};
+            stateInfo.action = aimPoseAction_;
+            stateInfo.subactionPath = handSubactionPaths_[i];
+            XrActionStatePose aimState{XR_TYPE_ACTION_STATE_POSE};
+            if (getActionStatePose_(session_, &stateInfo, &aimState) == XR_SUCCESS && aimState.isActive) {
+                frame.aim_active[i] = 1;
+                XrSpaceLocation aimLocation{XR_TYPE_SPACE_LOCATION};
+                if (locateSpace_(aimSpaces_[i], localSpace_, locateTime, &aimLocation) == XR_SUCCESS) {
+                    frame.aim_flags[i] = aimLocation.locationFlags;
+                    frame.aim[i] = to_protocol_pose(aimLocation.pose);
+                }
+            }
             stateInfo.action = handPoseAction_;
             stateInfo.subactionPath = handSubactionPaths_[i];
             XrActionStatePose state{XR_TYPE_ACTION_STATE_POSE};
@@ -1214,8 +1651,33 @@ private:
                 continue;
             }
 
+            auto& input = frame.controllers[i];
+            input.active = 1;
+            constexpr uint32_t buttonBits[] = {axrb::protocol::PrimaryClick, axrb::protocol::SecondaryClick,
+                axrb::protocol::MenuClick, axrb::protocol::StickClick, axrb::protocol::PrimaryTouch,
+                axrb::protocol::SecondaryTouch, axrb::protocol::TriggerTouch, axrb::protocol::StickTouch,
+                axrb::protocol::ThumbrestTouch};
+            for (size_t action = 0; action < InputCount; ++action) {
+                stateInfo.action = inputActions_[action];
+                if (action <= Squeeze) {
+                    XrActionStateFloat value{XR_TYPE_ACTION_STATE_FLOAT};
+                    if (getActionStateFloat_(session_, &stateInfo, &value) == XR_SUCCESS && value.isActive)
+                        (action == Trigger ? input.trigger : input.squeeze) = value.currentState;
+                } else if (action == Stick) {
+                    XrActionStateVector2f value{XR_TYPE_ACTION_STATE_VECTOR2F};
+                    if (getActionStateVector2f_(session_, &stateInfo, &value) == XR_SUCCESS && value.isActive) {
+                        input.stick_x = value.currentState.x; input.stick_y = value.currentState.y;
+                    }
+                } else {
+                    XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN};
+                    if (getActionStateBoolean_(session_, &stateInfo, &value) == XR_SUCCESS && value.isActive && value.currentState)
+                        input.buttons |= buttonBits[action - Primary];
+                }
+            }
+
             XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
             result = locateSpace_(handSpaces_[i], localSpace_, locateTime, &location);
+            if (result == XR_SUCCESS) frame.grip_flags[i] = location.locationFlags;
             if (result != XR_SUCCESS ||
                 (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) == 0 ||
                 (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
@@ -1226,6 +1688,10 @@ private:
             target = to_protocol_pose(location.pose);
             locatedAny = true;
         }
+
+        menuShortcut_.apply(frame.controllers, static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()));
 
         if (locatedAny) {
             if (sequence % 90 == 0) {
@@ -1283,20 +1749,34 @@ private:
     XrSystemId systemId_ = XR_NULL_SYSTEM_ID;
     XrSession session_ = XR_NULL_HANDLE;
     XrSpace localSpace_ = XR_NULL_HANDLE;
+    XrSpace appLocalSpace_ = XR_NULL_HANDLE;
+    XrReferenceSpaceType trackingSpaceType_ = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    bool reportedLocalOrigin_ = false;
+    bool localOriginInitialized_ = false;
     XrSpace viewSpace_ = XR_NULL_HANDLE;
     XrActionSet actionSet_ = XR_NULL_HANDLE;
     XrAction handPoseAction_ = XR_NULL_HANDLE;
+    XrAction aimPoseAction_ = XR_NULL_HANDLE;
+    bool handTrackingEnabled_ = false, handDataSourceEnabled_ = false;
+    PFN_xrCreateHandTrackerEXT createHandTracker_ = nullptr;
+    PFN_xrDestroyHandTrackerEXT destroyHandTracker_ = nullptr;
+    PFN_xrLocateHandJointsEXT locateHandJoints_ = nullptr;
+    std::array<XrHandTrackerEXT, 2> handTrackers_{};
+    std::array<XrAction, InputCount> inputActions_{};
     std::array<XrPath, 2> handSubactionPaths_{XR_NULL_PATH, XR_NULL_PATH};
     std::array<XrSpace, 2> handSpaces_{XR_NULL_HANDLE, XR_NULL_HANDLE};
+    std::array<XrSpace, 2> aimSpaces_{XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool sessionRunning_ = false;
     bool useFrameLoop_ = true;
     bool controllerActionsReady_ = false;
+    MenuShortcut menuShortcut_;
     bool reportedSyncFailure_ = false;
     axrb::protocol::PoseFrame latest_{};
     std::mutex frameMutex_;
 
     PFN_xrDestroyInstance destroyInstance_ = nullptr;
     PFN_xrGetSystem getSystem_ = nullptr;
+    PFN_xrEnumerateViewConfigurationViews enumerateViewConfigurationViews_ = nullptr;
     PFN_xrCreateSession createSession_ = nullptr;
     PFN_xrDestroySession destroySession_ = nullptr;
     PFN_xrCreateReferenceSpace createReferenceSpace_ = nullptr;
@@ -1319,6 +1799,9 @@ private:
     PFN_xrCreateActionSpace createActionSpace_ = nullptr;
     PFN_xrSyncActions syncActions_ = nullptr;
     PFN_xrGetActionStatePose getActionStatePose_ = nullptr;
+    PFN_xrGetActionStateBoolean getActionStateBoolean_ = nullptr;
+    PFN_xrGetActionStateFloat getActionStateFloat_ = nullptr;
+    PFN_xrGetActionStateVector2f getActionStateVector2f_ = nullptr;
 #if defined(_WIN32)
     PFN_xrEnumerateSwapchainFormats enumerateSwapchainFormats_ = nullptr;
     PFN_xrCreateSwapchain createSwapchain_ = nullptr;
@@ -1328,17 +1811,33 @@ private:
     PFN_xrWaitSwapchainImage waitSwapchainImage_ = nullptr;
     PFN_xrReleaseSwapchainImage releaseSwapchainImage_ = nullptr;
     PFN_xrGetD3D11GraphicsRequirementsKHR getD3D11GraphicsRequirements_ = nullptr;
+    std::mutex gpuMutex_;
+    WindowsGpuReceiver gpuReceiver_;
+    struct MixedFramePart { WindowsGpuReceiver receiver; axrb::protocol::ImageFrameHeader header{}; axrb::protocol::ImageProjection projection{}; };
+    std::array<std::array<MixedFramePart, axrb::protocol::kMaxCompositionLayers>, 2> mixedFrames_{};
+    uint32_t activeMixedBank_ = 0, activeMixedCount_ = 0, pendingMixedBank_ = 1, pendingMixedCount_ = 0, pendingMixedIndex_ = 0;
+    uint64_t pendingMixedSequence_ = 0;
+    std::vector<std::array<axrb::protocol::ImageQuad, axrb::protocol::kMaxCompositionLayers>> uploadedMixedQuads_;
+    std::vector<std::array<XrExtent2Di, axrb::protocol::kMaxCompositionLayers>> uploadedMixedExtents_;
+    std::vector<uint32_t> uploadedMixedCounts_;
+    std::vector<uint64_t> uploadedMixedTimes_;
+    ComPtr<ID3D11Device> receiveDevice_;
+    ComPtr<ID3D11DeviceContext> receiveContext_;
+    bool reportedGpuImage_ = false;
+    MirrorWindow mirror_;
     ComPtr<ID3D11Device> d3dDevice_;
     ComPtr<ID3D11DeviceContext> d3dContext_;
     XrSwapchain projectionSwapchain_ = XR_NULL_HANDLE;
     std::vector<XrSwapchainImageD3D11KHR> projectionImages_;
     std::vector<uint64_t> uploadedAndroidSequenceByImage_;
+    std::vector<uint64_t> uploadedGpuSessionByImage_;
     std::vector<axrb::protocol::ImageProjection> uploadedProjectionByImage_;
     std::vector<XrExtent2Di> uploadedExtentByImage_;
     bool reportedStereoProjection_ = false;
     int64_t projectionFormat_ = 0;
-    uint32_t projectionWidth_ = 512;
-    uint32_t projectionHeight_ = 512;
+    uint32_t projectionArraySize_ = 2;
+    uint32_t projectionWidth_ = axrb::protocol::kTransportEyeDimension;
+    uint32_t projectionHeight_ = axrb::protocol::kTransportEyeDimension;
     uint32_t projectionFrameCounter_ = 0;
     bool reportedProjectionSubmit_ = false;
     bool reportedAndroidImageSubmit_ = false;
@@ -1530,23 +2029,24 @@ int OpenXrHost::run(int argc, char** argv)
 
     axrb::protocol::TcpPoseServer server;
     if (mode == "--serve-openxr") {
-        HostImageFrame imageFrame;
-        OpenXrPoseSource poseSource(&imageFrame);
-        if (!poseSource.initialize()) {
+        auto imageFrame = std::make_shared<HostImageFrame>();
+        auto poseSource = std::make_shared<OpenXrPoseSource>(imageFrame.get());
+        const std::string gameName = argc >= 5 ? argv[4] : "Android game";
+        if (!poseSource->initialize(gameName) || !poseSource->open_mirror(gameName)) {
             return 1;
         }
-        std::thread imageThread([&] {
+        std::thread imageThread([imageFrame, poseSource] {
             axrb::protocol::TcpImageServer imageServer;
             imageServer.serve_with_callback(
                 38491,
                 0,
                 [&](const axrb::protocol::ImageFrameHeader& header, const axrb::protocol::ImageProjection& projection, std::vector<uint8_t>&& pixels) {
-                    imageFrame.store(header, std::move(pixels), projection);
+                    return poseSource->receive_image(header, projection, std::move(pixels));
                 });
         });
         imageThread.detach();
 
-        std::thread videoThread([&] {
+        std::thread videoThread([imageFrame] {
             axrb::protocol::UdpVideoReceiver videoReceiver;
             videoReceiver.receive(38492, 0, [&](axrb::protocol::EncodedVideoFrame&& frame) {
                 axrb::protocol::ImageFrameHeader header{};
@@ -1559,24 +2059,25 @@ int OpenXrHost::run(int argc, char** argv)
                     }
                     return;
                 }
-                imageFrame.store(header, std::move(pixels));
+                imageFrame->store(header, std::move(pixels));
             });
         });
         videoThread.detach();
 
-        std::thread poseThread([&] {
-            server.serve_with_producer(port, frames, [&](uint64_t sequence) {
-                return poseSource.latest_frame(sequence);
+        std::thread poseThread([poseSource, imageFrame, port, frames] {
+            axrb::protocol::TcpPoseServer poseServer;
+            poseServer.serve_with_producer(port, frames, [&](uint64_t sequence) {
+                return poseSource->latest_frame(sequence);
             });
         });
         poseThread.detach();
 
         uint64_t sequence = 0;
-        while (frames == 0 || sequence < frames) {
-            poseSource.make_frame(sequence++);
+        while ((frames == 0 || sequence < frames) && poseSource->pump_mirror()) {
+            poseSource->make_frame(sequence++);
             // OpenXR paces an active frame loop. An extra Windows sleep can
             // consume a timer tick and lower the compositor submission rate.
-            if (!poseSource.drives_frame_loop()) {
+            if (!poseSource->drives_frame_loop()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }

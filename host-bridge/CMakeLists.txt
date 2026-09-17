@@ -1,6 +1,7 @@
 add_executable(axrb-host-bridge
   main.cpp
   openxr_host.cpp
+  mirror_window.cpp
   pose_stream.cpp
   compositor_submit.cpp
   monado_backend.cpp
@@ -24,5 +25,5 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32)
-  target_link_libraries(axrb-host-bridge PRIVATE d3d11 dxgi)
+  target_link_libraries(axrb-host-bridge PRIVATE d3d11 dxgi user32 gdi32)
 endif()

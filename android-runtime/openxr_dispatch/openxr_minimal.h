@@ -71,17 +71,18 @@ enum XrResult : int32_t {
     XR_ERROR_FUNCTION_UNSUPPORTED = -7,
     XR_ERROR_FEATURE_UNSUPPORTED = -8,
     XR_ERROR_EXTENSION_NOT_PRESENT = -9,
-    XR_ERROR_HANDLE_INVALID = -11,
+    XR_ERROR_SIZE_INSUFFICIENT = -11,
+    XR_ERROR_HANDLE_INVALID = -12,
     XR_ERROR_INSTANCE_LOST = -13,
     XR_ERROR_SESSION_RUNNING = -14,
     XR_ERROR_SESSION_NOT_RUNNING = -16,
-    XR_ERROR_SYSTEM_INVALID = -17,
-    XR_ERROR_PATH_INVALID = -18,
-    XR_ERROR_PATH_COUNT_EXCEEDED = -19,
-    XR_ERROR_PATH_FORMAT_INVALID = -20,
-    XR_ERROR_PATH_UNSUPPORTED = -21,
-    XR_ERROR_LAYER_INVALID = -22,
-    XR_ERROR_LAYER_LIMIT_EXCEEDED = -23,
+    XR_ERROR_SYSTEM_INVALID = -18,
+    XR_ERROR_PATH_INVALID = -19,
+    XR_ERROR_PATH_COUNT_EXCEEDED = -20,
+    XR_ERROR_PATH_FORMAT_INVALID = -21,
+    XR_ERROR_PATH_UNSUPPORTED = -22,
+    XR_ERROR_LAYER_INVALID = -23,
+    XR_ERROR_LAYER_LIMIT_EXCEEDED = -24,
     XR_ERROR_SWAPCHAIN_RECT_INVALID = -25,
     XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED = -26,
     XR_ERROR_ACTION_TYPE_MISMATCH = -27,
@@ -129,6 +130,7 @@ enum XrStructureType : int32_t {
     XR_TYPE_EVENT_DATA_BUFFER = 16,
     XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING = 17,
     XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED = 18,
+    XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED = 52,
     XR_TYPE_ACTION_STATE_BOOLEAN = 23,
     XR_TYPE_ACTION_STATE_FLOAT = 24,
     XR_TYPE_ACTION_STATE_VECTOR2F = 25,
@@ -138,6 +140,7 @@ enum XrStructureType : int32_t {
     XR_TYPE_FRAME_WAIT_INFO = 33,
     XR_TYPE_ACTIONS_SYNC_INFO = 61,
     XR_TYPE_COMPOSITION_LAYER_PROJECTION = 35,
+    XR_TYPE_COMPOSITION_LAYER_QUAD = 36,
     XR_TYPE_REFERENCE_SPACE_CREATE_INFO = 37,
     XR_TYPE_ACTION_SPACE_CREATE_INFO = 38,
     XR_TYPE_VIEW_CONFIGURATION_VIEW = 41,
@@ -231,6 +234,7 @@ constexpr XrSpaceLocationFlags XR_SPACE_LOCATION_ORIENTATION_VALID_BIT = 0x00000
 constexpr XrSpaceLocationFlags XR_SPACE_LOCATION_POSITION_VALID_BIT = 0x00000002;
 constexpr XrSpaceLocationFlags XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT = 0x00000004;
 constexpr XrSpaceLocationFlags XR_SPACE_LOCATION_POSITION_TRACKED_BIT = 0x00000008;
+constexpr XrSwapchainCreateFlags XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT = 0x00000002;
 constexpr XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT = 0x00000001;
 constexpr XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT = 0x00000002;
 constexpr XrSwapchainUsageFlags XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT = 0x00000008;
@@ -602,6 +606,7 @@ struct XrFrameEndInfo {
 
 struct XrOffset2Di { int32_t x; int32_t y; };
 struct XrExtent2Di { int32_t width; int32_t height; };
+struct XrExtent2Df { float width; float height; };
 struct XrRect2Di { XrOffset2Di offset; XrExtent2Di extent; };
 struct XrSwapchainSubImage {
     XrSwapchain swapchain;
@@ -629,6 +634,16 @@ struct XrCompositionLayerProjection {
     uint32_t viewCount;
     const XrCompositionLayerProjectionView* views;
 };
+struct XrCompositionLayerQuad {
+    XrStructureType type;
+    const void* next;
+    XrCompositionLayerFlags layerFlags;
+    XrSpace space;
+    int32_t eyeVisibility;
+    XrSwapchainSubImage subImage;
+    XrPosef pose;
+    XrExtent2Df size;
+};
 
 struct XrEventDataBuffer {
     XrStructureType type;
@@ -642,6 +657,12 @@ struct XrEventDataSessionStateChanged {
     XrSession session;
     XrSessionState state;
     XrTime time;
+};
+
+struct XrEventDataInteractionProfileChanged {
+    XrStructureType type;
+    const void* next;
+    XrSession session;
 };
 
 struct XrViewConfigurationProperties {

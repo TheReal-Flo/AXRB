@@ -17,11 +17,34 @@ import java.net.Socket;
 import java.util.List;
 
 public final class RuntimeBrokerProvider extends ContentProvider {
+    @Override
+    public android.os.Bundle call(String method, String arg, android.os.Bundle extras) {
+        if (!"axrb_app_metadata".equals(method)) return super.call(method, arg, extras);
+        android.os.Bundle result = new android.os.Bundle();
+        try {
+            if (arg == null || !arg.matches("[a-zA-Z0-9_.]+")) throw new IllegalArgumentException("Invalid package");
+            android.content.pm.PackageManager pm = getContext().getPackageManager();
+            ApplicationInfo app = pm.getApplicationInfo(arg, 0);
+            String label = pm.getApplicationLabel(app).toString();
+            result.putString("label64", android.util.Base64.encodeToString(label.getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP));
+            android.graphics.drawable.Drawable icon = pm.getApplicationIcon(app);
+            android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(512, 512, android.graphics.Bitmap.Config.ARGB_8888);
+            icon.setBounds(0, 0, 512, 512);
+            icon.draw(new android.graphics.Canvas(bitmap));
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, bytes);
+            bitmap.recycle();
+            result.putString("icon64", android.util.Base64.encodeToString(bytes.toByteArray(), android.util.Base64.NO_WRAP));
+        } catch (Exception e) {
+            result.putString("error", e.getClass().getSimpleName());
+        }
+        return result;
+    }
     private static final String TAG = "AXRB.PoseBroker";
     private static final int BRIDGE_PORT = 38490;
-    private static final int POSE_FRAME_BYTES = 112;
+    private static final int POSE_FRAME_BYTES = 2408;
     private static final int POSE_MAGIC = 0x42525841;
-    private static final short POSE_VERSION = 1;
+    private static final short POSE_VERSION = 5;
     private static final short POSE_TYPE = 1;
 
     private static final String[] ACTIVE_RUNTIME_COLUMNS = {
@@ -220,13 +243,15 @@ public final class RuntimeBrokerProvider extends ContentProvider {
 
             try {
                 byte[] frame = new byte[POSE_FRAME_BYTES];
-                input.readFully(frame);
+                input.readFully(frame, 0, 8);
+                short version = readShortLE(frame, 4);
                 if (readIntLE(frame, 0) != POSE_MAGIC
-                        || readShortLE(frame, 4) != POSE_VERSION
+                        || (version < 1 || version > POSE_VERSION)
                         || readShortLE(frame, 6) != POSE_TYPE) {
                     closeSocketLocked();
                     return;
                 }
+                input.readFully(frame, 8, (version == 1 ? 112 : version == 2 ? 160 : version == 3 ? 2360 : version == 4 ? 2368 : POSE_FRAME_BYTES) - 8);
 
                 sequence = readLongLE(frame, 8);
                 monotonicTimeNs = readLongLE(frame, 16);

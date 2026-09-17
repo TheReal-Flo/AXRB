@@ -20,6 +20,13 @@ int main() {
     queueInfo.queueFamilyIndex = family; queueInfo.queueCount = 1; queueInfo.pQueuePriorities = &priority;
     VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO}; deviceInfo.queueCreateInfoCount = 1; deviceInfo.pQueueCreateInfos = &queueInfo;
     VkDevice device{}; REQUIRE(vkCreateDevice(physical, &deviceInfo, nullptr, &device) == VK_SUCCESS);
+    // Unity uses dynamic uniform-buffer descriptor pools during startup.
+    VkDescriptorPoolSize descriptorSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 256};
+    VkDescriptorPoolCreateInfo descriptorInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    descriptorInfo.maxSets = 128; descriptorInfo.poolSizeCount = 1; descriptorInfo.pPoolSizes = &descriptorSize;
+    VkDescriptorPool descriptors{};
+    REQUIRE(vkCreateDescriptorPool(device, &descriptorInfo, nullptr, &descriptors) == VK_SUCCESS);
+    vkDestroyDescriptorPool(device, descriptors, nullptr);
     VkQueue queue{}; vkGetDeviceQueue(device, family, 0, &queue);
     VulkanBackend backend;
     XrGraphicsBindingVulkanKHR binding{XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR, nullptr, instance, physical, device, family, 0};
@@ -87,11 +94,14 @@ int main() {
             XrSwapchainSubImage right = left; right.imageArrayIndex = 1;
             const VulkanSwapchain* chains[] = {&sc, &sc}; const uint32_t indices[] = {index, index};
             const XrSwapchainSubImage* subimages[] = {&left, &right}; std::vector<uint8_t> result[2];
-            REQUIRE(backend.readback(chains, indices, subimages, result));
-            REQUIRE(result[0].size() == 512*512*4 && result[1].size() == result[0].size());
+            backend.disable_gpu_export(); // Exercise real pixel fallback and staging growth.
+            const uint32_t outWidth = index == 1 ? 1536 : 512;
+            const uint32_t outHeight = index == 1 ? 1024 : 384;
+            REQUIRE(backend.readback(chains, indices, subimages, outWidth, outHeight, result));
+            REQUIRE(result[0].size() == outWidth*outHeight*4 && result[1].size() == result[0].size());
             // AXRI bottom-up convention: blue bottom, red top, green second layer.
             REQUIRE(result[0][0] == 0 && result[0][2] == 255);
-            REQUIRE(result[0][511*512*4] == 255 && result[0][511*512*4+2] == 0);
+            REQUIRE(result[0][(outHeight-1)*outWidth*4] == 255 && result[0][(outHeight-1)*outWidth*4+2] == 0);
             for (size_t p = 0; p < result[1].size(); p += 4)
                 REQUIRE(result[1][p] == 0 && result[1][p+1] == 255 && result[1][p+2] == 0 && result[1][p+3] == 255);
         }

@@ -1,6 +1,18 @@
+#include <array>
 #include "openxr_dispatch/openxr_minimal.h"
+#include "openxr_dispatch/hand_tracking_types.h"
 
 #include <cstdlib>
+#include <cmath>
+#include <ctime>
+#include <limits>
+#if defined(AXRB_INPUT_FIXTURE)
+#include "pose_frame.h"
+axrb::protocol::PoseFrame& axrb_input_fixture();
+#endif
+#include <cstring>
+#include <string>
+#include <vector>
 
 extern "C" XrResult XRAPI_CALL xrNegotiateLoaderRuntimeInterface(
     const XrNegotiateLoaderInfo* loaderInfo,
@@ -57,6 +69,22 @@ int main()
         return EXIT_FAILURE;
     }
 
+#if defined(AXRB_INPUT_FIXTURE)
+    using ToTime = XrResult(XRAPI_PTR*)(XrInstance, const timespec*, XrTime*);
+    using ToTimespec = XrResult(XRAPI_PTR*)(XrInstance, XrTime, timespec*);
+    auto toTime = get<ToTime>(runtimeRequest.getInstanceProcAddr, instance, "xrConvertTimespecTimeToTimeKHR");
+    auto toTimespec = get<ToTimespec>(runtimeRequest.getInstanceProcAddr, instance, "xrConvertTimeToTimespecTimeKHR");
+    timespec ts{123, 456789}, roundtrip{}; XrTime converted = 0;
+    if (!toTime || !toTimespec || toTime(instance, &ts, &converted) != XR_SUCCESS || converted != 123000456789LL ||
+        toTimespec(instance, converted, &roundtrip) != XR_SUCCESS || roundtrip.tv_sec != ts.tv_sec || roundtrip.tv_nsec != ts.tv_nsec ||
+        toTime(nullptr, &ts, &converted) != XR_ERROR_HANDLE_INVALID ||
+        toTime(instance, nullptr, &converted) != XR_ERROR_VALIDATION_FAILURE ||
+        toTimespec(instance, 0, &roundtrip) != XR_ERROR_TIME_INVALID) return EXIT_FAILURE;
+    ts.tv_sec = std::numeric_limits<decltype(ts.tv_sec)>::max();
+    if (toTime(instance, &ts, &converted) != XR_ERROR_TIME_INVALID) return EXIT_FAILURE;
+    ts = {123, 1000000000};
+    if (toTime(instance, &ts, &converted) != XR_ERROR_TIME_INVALID) return EXIT_FAILURE;
+#endif
     using GetSystem = XrResult(XRAPI_PTR*)(XrInstance, const XrSystemGetInfo*, XrSystemId*);
     using GetInstanceProperties = XrResult(XRAPI_PTR*)(XrInstance, XrInstanceProperties*);
     using GetSystemProperties = XrResult(XRAPI_PTR*)(XrInstance, XrSystemId, XrSystemProperties*);
@@ -145,6 +173,23 @@ int main()
     }
 
     XrSystemProperties systemProperties{};
+#if defined(AXRB_INPUT_FIXTURE)
+    axrb_input_fixture().render_width = 2880;
+    axrb_input_fixture().render_height = 3200;
+    axrb_input_fixture().local_origin_flags = axrb_input_fixture().hmd_flags = 15;
+#endif
+    using EnumerateViews = XrResult(XRAPI_PTR*)(XrInstance, XrSystemId, XrViewConfigurationType, uint32_t, uint32_t*, XrViewConfigurationView*);
+    auto enumerateViews = get<EnumerateViews>(runtimeRequest.getInstanceProcAddr, instance, "xrEnumerateViewConfigurationViews");
+    XrViewConfigurationView configs[2]{{XR_TYPE_VIEW_CONFIGURATION_VIEW}, {XR_TYPE_VIEW_CONFIGURATION_VIEW}};
+    uint32_t configCount = 0;
+    if (!enumerateViews || enumerateViews(instance, systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &configCount, configs) != XR_SUCCESS || configCount != 2) return EXIT_FAILURE;
+    for (const auto& config : configs) {
+#if defined(AXRB_INPUT_FIXTURE)
+        if (config.recommendedImageRectWidth != 2880 || config.recommendedImageRectHeight != 3200) return EXIT_FAILURE;
+#else
+        if (config.recommendedImageRectWidth != 1024 || config.recommendedImageRectHeight != 1024) return EXIT_FAILURE;
+#endif
+    }
     systemProperties.type = XR_TYPE_SYSTEM_PROPERTIES;
     if (xrGetSystemProperties(instance, systemId, &systemProperties) != XR_SUCCESS) {
         return EXIT_FAILURE;
@@ -267,9 +312,9 @@ int main()
     secondRelease.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
     if (xrCreateSwapchain(session, &swapchainCreateInfo, &secondEye) != XR_SUCCESS ||
         secondEye == swapchain ||
-        xrAcquireSwapchainImage(secondEye, &acquireInfo, &secondEyeIndex) != XR_SUCCESS ||
+        xrAcquireSwapchainImage(secondEye, nullptr, &secondEyeIndex) != XR_SUCCESS ||
         xrWaitSwapchainImage(secondEye, &waitSwapchainInfo) != XR_SUCCESS ||
-        xrReleaseSwapchainImage(secondEye, &secondRelease) != XR_SUCCESS ||
+        xrReleaseSwapchainImage(secondEye, nullptr) != XR_SUCCESS ||
         xrDestroySwapchain(secondEye) != XR_SUCCESS ||
         xrAcquireSwapchainImage(secondEye, &acquireInfo, &secondEyeIndex) != XR_ERROR_HANDLE_INVALID) {
         return EXIT_FAILURE;
@@ -300,11 +345,196 @@ int main()
         return EXIT_FAILURE;
     }
 
+    using CreateHand = XrResult(XRAPI_PTR*)(XrSession, const XrHandTrackerCreateInfoEXT*, XrHandTrackerEXT*);
+    using LocateHand = XrResult(XRAPI_PTR*)(XrHandTrackerEXT, const XrHandJointsLocateInfoEXT*, XrHandJointLocationsEXT*);
+    using DestroyHand = XrResult(XRAPI_PTR*)(XrHandTrackerEXT);
+    auto createHand = get<CreateHand>(runtimeRequest.getInstanceProcAddr, instance, "xrCreateHandTrackerEXT");
+    auto locateHand = get<LocateHand>(runtimeRequest.getInstanceProcAddr, instance, "xrLocateHandJointsEXT");
+    auto destroyHand = get<DestroyHand>(runtimeRequest.getInstanceProcAddr, instance, "xrDestroyHandTrackerEXT");
+    if (!createHand || !locateHand || !destroyHand) return EXIT_FAILURE;
+    XrHandTrackerCreateInfoEXT handInfo{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+    handInfo.hand = XR_HAND_LEFT_EXT; handInfo.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+    XrHandTrackerEXT hand = nullptr;
+    if (createHand(session, &handInfo, &hand) != XR_SUCCESS || !hand) return EXIT_FAILURE;
+    XrHandJointLocationEXT joints[26]{};
+    for (auto& joint : joints) joint.locationFlags = 15;
+    XrHandTrackingDataSourceStateEXT source{XR_TYPE_HAND_TRACKING_DATA_SOURCE_STATE_EXT};
+    source.isActive = 1;
+    XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+    locations.next = &source; locations.jointCount = 26; locations.jointLocations = joints;
+    XrHandJointsLocateInfoEXT handLocate{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+    handLocate.baseSpace = space; handLocate.time = 1;
+    // No host hand data in the native smoke test: clear activity and all flags.
+    if (locateHand(hand, &handLocate, &locations) != XR_SUCCESS || locations.isActive || source.isActive) return EXIT_FAILURE;
+    for (const auto& joint : joints) if (joint.locationFlags) return EXIT_FAILURE;
+#if defined(AXRB_INPUT_FIXTURE)
+    auto& inputFrame = axrb_input_fixture();
+    inputFrame.hands[0].active = 1; inputFrame.hands[0].source = 2;
+    inputFrame.hands[0].joints[0] = {15, {1, 2, 3}, 0.02f};
+    auto offsetInfo = spaceCreateInfo;
+    offsetInfo.poseInReferenceSpace.position = {0.25f, 0.5f, 0.75f};
+    XrSpace offsetSpace{};
+    if (xrCreateReferenceSpace(session, &offsetInfo, &offsetSpace) != XR_SUCCESS) return EXIT_FAILURE;
+    handLocate.baseSpace = offsetSpace;
+    if (locateHand(hand, &handLocate, &locations) != XR_SUCCESS || !locations.isActive ||
+        !source.isActive || source.dataSource != XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT ||
+        joints[0].locationFlags != 15 || joints[0].radius != 0.02f ||
+        joints[0].pose.position.x != 0.75f || joints[0].pose.position.y != 1.5f || joints[0].pose.position.z != 2.25f) return EXIT_FAILURE;
+    XrHandTrackingDataSourceEXT optical = XR_HAND_TRACKING_DATA_SOURCE_UNOBSTRUCTED_EXT;
+    XrHandTrackingDataSourceInfoEXT sourceInfo{XR_TYPE_HAND_TRACKING_DATA_SOURCE_INFO_EXT};
+    sourceInfo.requestedDataSourceCount = 1; sourceInfo.requestedDataSources = &optical;
+    handInfo.next = &sourceInfo;
+    XrHandTrackerEXT opticalHand{};
+    if (createHand(session, &handInfo, &opticalHand) != XR_SUCCESS ||
+        locateHand(opticalHand, &handLocate, &locations) != XR_SUCCESS || locations.isActive || joints[0].locationFlags) return EXIT_FAILURE;
+    inputFrame.hands[0].source = 1;
+    if (locateHand(opticalHand, &handLocate, &locations) != XR_SUCCESS || !locations.isActive ||
+        source.dataSource != XR_HAND_TRACKING_DATA_SOURCE_UNOBSTRUCTED_EXT || destroyHand(opticalHand) != XR_SUCCESS) return EXIT_FAILURE;
+    inputFrame.hands[0] = {};
+    if (locateHand(hand, &handLocate, &locations) != XR_SUCCESS || locations.isActive || joints[0].locationFlags) return EXIT_FAILURE;
+#endif
+    locations.jointCount = 25;
+    if (locateHand(hand, &handLocate, &locations) != XR_ERROR_VALIDATION_FAILURE) return EXIT_FAILURE;
+    locations.jointCount = 26;
+    if (destroyHand(hand) != XR_SUCCESS || destroyHand(hand) != XR_ERROR_HANDLE_INVALID ||
+        locateHand(hand, &handLocate, &locations) != XR_ERROR_HANDLE_INVALID) return EXIT_FAILURE;
+
     XrFrameWaitInfo waitInfo{};
+    // Full games create hundreds of paths/actions and retain early handles.
+    using StringToPath = XrResult(XRAPI_PTR*)(XrInstance, const char*, XrPath*);
+    using PathToString = XrResult(XRAPI_PTR*)(XrInstance, XrPath, uint32_t, uint32_t*, char*);
+    using CreateActionSet = XrResult(XRAPI_PTR*)(XrInstance, const XrActionSetCreateInfo*, XrActionSet*);
+    using CreateAction = XrResult(XRAPI_PTR*)(XrActionSet, const XrActionCreateInfo*, XrAction*);
+    using DestroyAction = XrResult(XRAPI_PTR*)(XrAction);
+    auto stringToPath = get<StringToPath>(runtimeRequest.getInstanceProcAddr, instance, "xrStringToPath");
+    auto pathToString = get<PathToString>(runtimeRequest.getInstanceProcAddr, instance, "xrPathToString");
+    auto createActionSet = get<CreateActionSet>(runtimeRequest.getInstanceProcAddr, instance, "xrCreateActionSet");
+    auto createAction = get<CreateAction>(runtimeRequest.getInstanceProcAddr, instance, "xrCreateAction");
+    auto destroyAction = get<DestroyAction>(runtimeRequest.getInstanceProcAddr, instance, "xrDestroyAction");
+    if (!stringToPath || !pathToString || !createActionSet || !createAction || !destroyAction) { return EXIT_FAILURE; }
+    XrActionSetCreateInfo setInfo{};
+    setInfo.type = XR_TYPE_ACTION_SET_CREATE_INFO;
+    std::strcpy(setInfo.actionSetName, "game");
+    std::strcpy(setInfo.localizedActionSetName, "Game");
+    XrActionSet actionSet{};
+    if (createActionSet(instance, &setInfo, &actionSet) != XR_SUCCESS) { return EXIT_FAILURE; }
+#if defined(AXRB_INPUT_FIXTURE)
+    using Suggest = XrResult(XRAPI_PTR*)(XrInstance, const XrInteractionProfileSuggestedBinding*);
+    using CreateActionSpace = XrResult(XRAPI_PTR*)(XrSession, const XrActionSpaceCreateInfo*, XrSpace*);
+    using LocateSpace = XrResult(XRAPI_PTR*)(XrSpace, XrSpace, XrTime, XrSpaceLocation*);
+    auto suggest = get<Suggest>(runtimeRequest.getInstanceProcAddr, instance, "xrSuggestInteractionProfileBindings");
+    auto createActionSpace = get<CreateActionSpace>(runtimeRequest.getInstanceProcAddr, instance, "xrCreateActionSpace");
+    auto locateSpace = get<LocateSpace>(runtimeRequest.getInstanceProcAddr, instance, "xrLocateSpace");
+    if (!suggest || !createActionSpace || !locateSpace) return EXIT_FAILURE;
+#if defined(AXRB_INPUT_FIXTURE)
+    {
+        auto& pose = axrb_input_fixture();
+        const auto saved = pose;
+        pose.hmd = {0.4f, 1.72f, -0.2f, 0, 0, 0, 1};
+        pose.local_origin = {0.4f, 1.6f, -0.2f, 0, 0, 0, 1};
+        XrReferenceSpaceCreateInfo originInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+        originInfo.poseInReferenceSpace.orientation.w = 1;
+        XrSpace head{}, floor{}, offsetLocal{};
+        originInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+        if (xrCreateReferenceSpace(session, &originInfo, &head) != XR_SUCCESS) return EXIT_FAILURE;
+        originInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+        if (xrCreateReferenceSpace(session, &originInfo, &floor) != XR_SUCCESS) return EXIT_FAILURE;
+        originInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+        originInfo.poseInReferenceSpace.position.y = 0.25f;
+        if (xrCreateReferenceSpace(session, &originInfo, &offsetLocal) != XR_SUCCESS) return EXIT_FAILURE;
+        XrSpaceLocation height{XR_TYPE_SPACE_LOCATION};
+        if (locateSpace(head, space, 1, &height) != XR_SUCCESS || height.locationFlags != 15 ||
+            std::abs(height.pose.position.y - 0.12f) > 0.0001f || std::abs(height.pose.position.x) > 0.0001f) return EXIT_FAILURE;
+        if (locateSpace(head, floor, 1, &height) != XR_SUCCESS || std::abs(height.pose.position.y - 1.72f) > 0.0001f) return EXIT_FAILURE;
+        if (locateSpace(head, offsetLocal, 1, &height) != XR_SUCCESS || std::abs(height.pose.position.y + 0.13f) > 0.0001f) return EXIT_FAILURE;
+        // Engines emulate floor tracking by offsetting eye-level LOCAL down by
+        // the measured height. It must agree with STAGE, not add height twice.
+        originInfo.poseInReferenceSpace.position.y = -1.6f;
+        XrSpace emulatedFloor{};
+        if (xrCreateReferenceSpace(session, &originInfo, &emulatedFloor) != XR_SUCCESS ||
+            locateSpace(head, emulatedFloor, 1, &height) != XR_SUCCESS ||
+            std::abs(height.pose.position.y - 1.72f) > 0.0001f) return EXIT_FAILURE;
+        // A vertical origin adjustment must preserve the headset's roll and
+        // pitch, including when it was resting at an angle during startup.
+        pose.hmd.qx = 0.3f;
+        pose.hmd.qz = 0.4f;
+        pose.hmd.qw = std::sqrt(0.75f);
+        if (locateSpace(head, emulatedFloor, 1, &height) != XR_SUCCESS ||
+            std::abs(height.pose.orientation.x - pose.hmd.qx) > 0.0001f ||
+            std::abs(height.pose.orientation.z - pose.hmd.qz) > 0.0001f ||
+            std::abs(height.pose.orientation.w - pose.hmd.qw) > 0.0001f) return EXIT_FAILURE;
+        pose.local_origin_flags = 0;
+        if (locateSpace(head, space, 1, &height) != XR_SUCCESS || height.locationFlags) return EXIT_FAILURE;
+        pose = saved;
+    }
+#endif
+    XrPath profile{}, leftPath{}, gripPath{}, aimPath{};
+    if (stringToPath(instance, "/interaction_profiles/oculus/touch_controller", &profile) != XR_SUCCESS ||
+        stringToPath(instance, "/user/hand/left", &leftPath) != XR_SUCCESS ||
+        stringToPath(instance, "/user/hand/left/input/grip/pose", &gripPath) != XR_SUCCESS ||
+        stringToPath(instance, "/user/hand/left/input/aim/pose", &aimPath) != XR_SUCCESS) return EXIT_FAILURE;
+    inputFrame.left_controller = {1, 2, 3}; inputFrame.aim[0] = {4, 5, 6};
+    inputFrame.controllers[0].active = inputFrame.aim_active[0] = 1;
+    inputFrame.grip_flags[0] = 15; inputFrame.aim_flags[0] = 3;
+    for (bool aim : {false, true}) {
+        XrActionCreateInfo poseActionInfo{XR_TYPE_ACTION_CREATE_INFO};
+        poseActionInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+        std::strcpy(poseActionInfo.actionName, aim ? "test_aim" : "test_grip");
+        std::strcpy(poseActionInfo.localizedActionName, poseActionInfo.actionName);
+        poseActionInfo.countSubactionPaths = 1; poseActionInfo.subactionPaths = &leftPath;
+        XrAction poseAction{};
+        if (createAction(actionSet, &poseActionInfo, &poseAction) != XR_SUCCESS) return EXIT_FAILURE;
+        XrActionSuggestedBinding binding{poseAction, aim ? aimPath : gripPath};
+        XrInteractionProfileSuggestedBinding suggestion{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggestion.interactionProfile = profile; suggestion.countSuggestedBindings = 1; suggestion.suggestedBindings = &binding;
+        XrActionSpaceCreateInfo actionSpaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        actionSpaceInfo.action = poseAction; actionSpaceInfo.subactionPath = leftPath;
+        actionSpaceInfo.poseInActionSpace.orientation.w = 1;
+        actionSpaceInfo.poseInActionSpace.position.x = 0.25f;
+        XrSpace actionSpace{};
+        if (suggest(instance, &suggestion) != XR_SUCCESS || createActionSpace(session, &actionSpaceInfo, &actionSpace) != XR_SUCCESS) return EXIT_FAILURE;
+        XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+        if (locateSpace(actionSpace, space, 1, &location) != XR_SUCCESS ||
+            location.pose.position.x != (aim ? 4.25f : 1.25f) || location.locationFlags != (aim ? 3 : 15)) return EXIT_FAILURE;
+        (aim ? inputFrame.aim_active[0] : inputFrame.controllers[0].active) = 0;
+        if (locateSpace(actionSpace, space, 1, &location) != XR_SUCCESS || location.locationFlags) return EXIT_FAILURE;
+    }
+#endif
+    std::vector<XrAction> actions;
+    for (int i = 0; i < 256; ++i) {
+        const std::string pathText = "/test/" + std::string(140, 'a') + std::to_string(i);
+        XrPath path{}, repeated{};
+        char buffer[256]{};
+        uint32_t length = 0;
+        if (stringToPath(instance, pathText.c_str(), &path) != XR_SUCCESS ||
+            stringToPath(instance, pathText.c_str(), &repeated) != XR_SUCCESS || path != repeated ||
+            pathToString(instance, path, 0, &length, nullptr) != XR_SUCCESS || length != pathText.size() + 1 ||
+            pathToString(instance, path, 1, &length, buffer) != XR_ERROR_SIZE_INSUFFICIENT ||
+            pathToString(instance, path, sizeof(buffer), &length, buffer) != XR_SUCCESS || buffer != pathText) { return EXIT_FAILURE; }
+        XrActionCreateInfo actionInfo{};
+        actionInfo.type = XR_TYPE_ACTION_CREATE_INFO;
+        actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        const std::string name = "action" + std::to_string(i);
+        std::strcpy(actionInfo.actionName, name.c_str());
+        std::strcpy(actionInfo.localizedActionName, name.c_str());
+        XrAction action{};
+        if (createAction(actionSet, &actionInfo, &action) != XR_SUCCESS) { return EXIT_FAILURE; }
+        actions.push_back(action);
+        XrSpace extraSpace{};
+        if (xrCreateReferenceSpace(session, &spaceCreateInfo, &extraSpace) != XR_SUCCESS) { return EXIT_FAILURE; }
+    }
+    for (auto action : actions) {
+        if (destroyAction(action) != XR_SUCCESS || destroyAction(action) != XR_ERROR_HANDLE_INVALID) { return EXIT_FAILURE; }
+    }
+    using GetBounds = XrResult(XRAPI_PTR*)(XrSession, XrReferenceSpaceType, XrExtent2Df*);
+    auto getBounds = get<GetBounds>(runtimeRequest.getInstanceProcAddr, instance, "xrGetReferenceSpaceBoundsRect");
+    XrExtent2Df bounds{1, 1};
+    if (!getBounds || getBounds(session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds) != XR_SPACE_BOUNDS_UNAVAILABLE ||
+        bounds.width != 0 || bounds.height != 0) { return EXIT_FAILURE; }
     waitInfo.type = XR_TYPE_FRAME_WAIT_INFO;
     XrFrameState frameState{};
     frameState.type = XR_TYPE_FRAME_STATE;
-    if (xrWaitFrame(session, &waitInfo, &frameState) != XR_SUCCESS || frameState.shouldRender == 0) {
+    if (xrWaitFrame(session, nullptr, &frameState) != XR_SUCCESS || frameState.shouldRender == 0) {
         return EXIT_FAILURE;
     }
 
@@ -321,14 +551,18 @@ int main()
     views[1].type = XR_TYPE_VIEW;
     uint32_t locatedViewCount = 0;
     if (xrLocateViews(session, &locateInfo, &viewState, 2, &locatedViewCount, views) != XR_SUCCESS ||
-        locatedViewCount != 2 ||
-        (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) == 0) {
+        locatedViewCount != 2) {
         return EXIT_FAILURE;
     }
+#if defined(AXRB_INPUT_FIXTURE)
+    if ((viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) == 0) return EXIT_FAILURE;
+#else
+    if (viewState.viewStateFlags != 0) return EXIT_FAILURE; // No real host pose yet.
+#endif
 
     XrFrameBeginInfo beginInfo{};
     beginInfo.type = XR_TYPE_FRAME_BEGIN_INFO;
-    if (xrBeginFrame(session, &beginInfo) != XR_SUCCESS) {
+    if (xrBeginFrame(session, nullptr) != XR_SUCCESS) {
         return EXIT_FAILURE;
     }
 
@@ -360,6 +594,13 @@ int main()
     endInfo.layerCount = 1;
     endInfo.layers = layers;
     if (xrEndFrame(session, &endInfo) != XR_SUCCESS) { return EXIT_FAILURE; }
+    // Forward core composition flags to the host compositor, including alpha
+    // blending. Reject unknown bits rather than silently dropping semantics.
+    projection.layerFlags = 7;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) { return EXIT_FAILURE; }
+    projection.layerFlags = 8;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_LAYER_INVALID) { return EXIT_FAILURE; }
+    projection.layerFlags = 0;
     projectionViews[1].subImage.imageArrayIndex = 2;
     if (xrEndFrame(session, &endInfo) != XR_ERROR_SWAPCHAIN_RECT_INVALID) { return EXIT_FAILURE; }
     projectionViews[1].subImage.imageArrayIndex = 1;
@@ -379,6 +620,65 @@ int main()
         xrReleaseSwapchainImage(secondEye, &releaseInfo) != XR_SUCCESS ||
         xrEndFrame(session, &endInfo) != XR_SUCCESS ||
         xrDestroySwapchain(secondEye) != XR_SUCCESS) { return EXIT_FAILURE; }
+
+    // Static swapchains allocate one image and may be acquired only once.
+    auto staticInfo = swapchainCreateInfo;
+    staticInfo.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
+    XrSwapchain staticSwapchain{};
+    uint32_t staticCount = 0, staticIndex = 99;
+    if (xrCreateSwapchain(session, &staticInfo, &staticSwapchain) != XR_SUCCESS ||
+        xrEnumerateSwapchainImages(staticSwapchain, 0, &staticCount, nullptr) != XR_SUCCESS || staticCount != 1 ||
+        xrAcquireSwapchainImage(staticSwapchain, &acquireInfo, &staticIndex) != XR_SUCCESS || staticIndex != 0 ||
+        xrWaitSwapchainImage(staticSwapchain, &waitSwapchainInfo) != XR_SUCCESS ||
+        xrReleaseSwapchainImage(staticSwapchain, &releaseInfo) != XR_SUCCESS ||
+        xrAcquireSwapchainImage(staticSwapchain, &acquireInfo, &staticIndex) != XR_ERROR_CALL_ORDER_INVALID ||
+        xrDestroySwapchain(staticSwapchain) != XR_SUCCESS) return EXIT_FAILURE;
+
+    XrCompositionLayerQuad quads[2]{};
+    for (unsigned i = 0; i < 2; ++i) {
+        quads[i].type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+        quads[i].space = space;
+        quads[i].pose.orientation.w = 1;
+        quads[i].pose.position.z = -2;
+        quads[i].size = {2, 1};
+        quads[i].eyeVisibility = i + 1;
+        quads[i].layerFlags = 7;
+        quads[i].subImage = projectionViews[0].subImage;
+    }
+    projectionViews[1].subImage = projectionViews[0].subImage;
+    const void* mixed[] = {&projection, &quads[0], &quads[1]};
+    endInfo.layerCount = 3; endInfo.layers = mixed;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) return EXIT_FAILURE;
+    quads[1].subImage.imageArrayIndex = 99;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_SWAPCHAIN_RECT_INVALID) return EXIT_FAILURE;
+    quads[1].subImage = projectionViews[0].subImage;
+    quads[1].size.width = -1;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_LAYER_INVALID) return EXIT_FAILURE;
+    quads[1].size.width = 2;
+    const void* sceneWithPanels[] = {&projection, &quads[0], &quads[1], &quads[0], &quads[1]};
+    endInfo.layerCount = 5; endInfo.layers = sceneWithPanels;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) return EXIT_FAILURE;
+    std::array<const void*, 16> maximumPanels{};
+    maximumPanels.fill(&quads[0]);
+    endInfo.layerCount = 16; endInfo.layers = maximumPanels.data();
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) return EXIT_FAILURE;
+    const void* fourPanels[] = {&quads[0], &quads[1], &quads[0], &quads[1]};
+    endInfo.layerCount = 4; endInfo.layers = fourPanels;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) return EXIT_FAILURE;
+    const void* panels[] = {&quads[0], &quads[1]};
+    endInfo.layerCount = 2;
+    endInfo.layers = panels;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) return EXIT_FAILURE;
+    quads[1].size.width = -1;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_LAYER_INVALID) return EXIT_FAILURE;
+    quads[1].size.width = 2;
+    quads[1].eyeVisibility = 3;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_LAYER_INVALID) return EXIT_FAILURE;
+    quads[1].eyeVisibility = 2;
+    panels[1] = nullptr;
+    if (xrEndFrame(session, &endInfo) != XR_ERROR_LAYER_INVALID) return EXIT_FAILURE;
+    endInfo.layerCount = 1;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) return EXIT_FAILURE;
 
     if (xrDestroySwapchain(swapchain) != XR_SUCCESS) {
         return EXIT_FAILURE;

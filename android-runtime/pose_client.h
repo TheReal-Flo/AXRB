@@ -2,6 +2,7 @@
 
 #include "pose_frame.h"
 #include "pose_stream_decoder.h"
+#include <mutex>
 
 #if defined(__ANDROID__)
 #include <jni.h>
@@ -11,12 +12,14 @@ namespace axrb::runtime {
 
 class PoseClient {
 public:
-    const axrb::protocol::PoseFrame& latest_pose_frame();
+    // Return a snapshot: callers may use it while another thread polls input.
+    axrb::protocol::PoseFrame latest_pose_frame();
 #if defined(__ANDROID__)
     void set_android_context(JavaVM* vm, jobject context);
 #endif
 
 private:
+    std::mutex mutex_;
     bool query_pose_broker();
     bool ensure_connected();
     bool ensure_emulator_connected();

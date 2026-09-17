@@ -4,8 +4,11 @@ param(
     [ValidatePattern('^[a-zA-Z0-9_-]+$')][string]$Avd = 'axrb-nvidia-api34',
     [ValidateRange(5554, 5682)][int]$Port = 5580,
     [ValidateSet('x86_64', 'arm64-v8a')][string]$Abi = 'x86_64',
+    [ValidateRange(2048, 16384)][int]$MemoryMB = 4096,
+    [ValidateSet('Default', 'Tsc', 'TscCorrected')][string]$GuestClock = 'Default',
     [string]$RuntimeApk,
     [string]$AppApk,
+    [switch]$GpuSharing,
     [switch]$ShowWindow
 )
 $ErrorActionPreference = 'Stop'
@@ -70,9 +73,46 @@ switch ($Action) {
         $devices = & $adb devices
         if ($devices -match "^$serial\s") { throw "$serial already exists; use Verify or Stop first." }
         New-Item -ItemType Directory -Force $logs | Out-Null
-        $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', '4096')
+        $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', "$MemoryMB")
         if (!$ShowWindow) { $arguments += '-no-window' }
-        $process = Start-Process $emulator -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\emulator.stdout.log" -RedirectStandardError "$logs\emulator.stderr.log"
+        if ($GuestClock -ne 'Default') {
+            # Request the CPU clock, retaining Linux's stability checks.
+            # QEMU's extra kernel options are appended to the Android defaults.
+            $arguments += @('-show-kernel', '-qemu', '-append', 'clocksource=tsc')
+        }
+        $oldLayerPath = $env:VK_LAYER_PATH
+        $oldLayers = $env:VK_INSTANCE_LAYERS
+        $oldPath = $env:PATH
+        $oldLauncherDir = $env:ANDROID_EMULATOR_LAUNCHER_DIR
+        $launchExe = $emulator
+        if ($GuestClock -eq 'TscCorrected') {
+            $qemu = Join-Path $Sdk 'emulator/qemu/windows-x86_64/qemu-system-x86_64-headless.exe'
+            $knownHash = 'DCEC1CC23AC57FF04EC748CDE7E42BFC713BF2AD532E49606A4A9332CFB94B56'
+            if ((Get-FileHash -LiteralPath $qemu -Algorithm SHA256).Hash -ne $knownHash) {
+                throw 'Clock correction is tested only with emulator 36.5.11 build 15261927. Use -GuestClock Default for other builds.'
+            }
+            $launchExe = (Resolve-Path "$PSScriptRoot/../build-whpx-clock/Release/axrb_clock_launcher.exe").Path
+            $clockDll = (Resolve-Path "$PSScriptRoot/../build-whpx-clock/Release/axrb_whpx_clock.dll").Path
+            $arguments = @(('"' + $qemu + '"'), ('"' + $clockDll + '"')) + $arguments
+        }
+        try {
+            if ($GuestClock -eq 'TscCorrected') {
+                $env:ANDROID_EMULATOR_LAUNCHER_DIR = Join-Path $Sdk 'emulator'
+                $env:PATH = "$Sdk\emulator;$Sdk\emulator\lib64;$oldPath"
+            }
+            if ($GpuSharing) {
+                $layerPath = (Resolve-Path "$PSScriptRoot\..\build-windows-gpu-layer\Release").Path
+                if (!(Test-Path "$layerPath\axrb_gpu_layer.json")) { throw 'Build tools/windows_gpu_layer first.' }
+                $env:VK_LAYER_PATH = $layerPath
+                $env:VK_INSTANCE_LAYERS = 'VK_LAYER_AXRB_gpu_share'
+            }
+            $process = Start-Process $launchExe -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\emulator.stdout.log" -RedirectStandardError "$logs\emulator.stderr.log"
+        } finally {
+            $env:VK_LAYER_PATH = $oldLayerPath
+            $env:VK_INSTANCE_LAYERS = $oldLayers
+            $env:PATH = $oldPath
+            $env:ANDROID_EMULATOR_LAUNCHER_DIR = $oldLauncherDir
+        }
         $deadline = (Get-Date).AddMinutes(3)
         do {
             Start-Sleep -Seconds 2
@@ -87,18 +127,24 @@ switch ($Action) {
             & $adb -s $serial emu kill | Out-Null
             throw
         }
+        if ($GuestClock -ne 'Default') {
+            $clock = (& $adb -s $serial shell su 0 cat /sys/devices/system/clocksource/clocksource0/current_clocksource) -join ''
+            if ($clock.Trim() -eq 'tsc') { Write-Host 'Guest clock: TSC (accepted by Linux stability checks).' }
+            else { Write-Warning "Guest retained '$($clock.Trim())'; the requested TSC optimization is not active. Stability checks were not overridden." }
+        }
         Run $adb @('-s', $serial, 'reverse', 'tcp:38490', 'tcp:38490')
         Run $adb @('-s', $serial, 'reverse', 'tcp:38491', 'tcp:38491')
+        Run $adb @('-s', $serial, 'shell', 'setprop', 'debug.axrb.gpu_share', $(if ($GpuSharing) { '1' } else { '0' }))
         Write-Host "Ready: $serial. Images use adb reverse :38491; native pose stream uses 10.0.2.2:38490."
     }
     Verify { Verify-Gpu; Verify-Abi }
     Install {
         Verify-Gpu
         Verify-Abi
-        Run $adb @('-s', $serial, 'install', '-r', $RuntimeApk)
+        Run $adb @('-s', $serial, 'install', '--no-incremental', '--force-queryable', '-r', $RuntimeApk)
         Run $adb @('-s', $serial, 'reverse', 'tcp:38490', 'tcp:38490')
         Run $adb @('-s', $serial, 'reverse', 'tcp:38491', 'tcp:38491')
-        if ($AppApk) { Run $adb @('-s', $serial, 'install', '-r', $AppApk) }
+        if ($AppApk) { Run $adb @('-s', $serial, 'install', '--no-incremental', '-r', $AppApk) }
     }
     Stop { Run $adb @('-s', $serial, 'emu', 'kill') }
 }
