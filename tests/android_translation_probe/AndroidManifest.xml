@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.axrb.mathprobe">
+  <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="29"/>
+  <application android:label="AXRB translation probe" android:debuggable="true" android:extractNativeLibs="true">
+    <activity android:name=".MainActivity" android:exported="true"/>
+  </application>
+</manifest>

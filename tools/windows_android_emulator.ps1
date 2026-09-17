@@ -3,6 +3,7 @@ param(
     [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",
     [ValidatePattern('^[a-zA-Z0-9_-]+$')][string]$Avd = 'axrb-nvidia-api34',
     [ValidateRange(5554, 5682)][int]$Port = 5580,
+    [ValidateSet(34, 35, 36)][int]$ApiLevel = 34,
     [ValidateSet('x86_64', 'arm64-v8a')][string]$Abi = 'x86_64',
     [ValidateRange(2048, 16384)][int]$MemoryMB = 4096,
     [ValidateSet('Default', 'Tsc', 'TscCorrected')][string]$GuestClock = 'Default',
@@ -17,7 +18,7 @@ $adb = Join-Path $Sdk 'platform-tools\adb.exe'
 $emulator = Join-Path $Sdk 'emulator\emulator.exe'
 $serial = "emulator-$Port"
 if (!$RuntimeApk) { $RuntimeApk = "$PSScriptRoot\..\build-android-runtime-windows-$Abi\axrb-openxr-runtime-debug.apk" }
-$image = 'system-images;android-34;google_apis;x86_64'
+$image = "system-images;android-$ApiLevel;google_apis;x86_64"
 $logs = Join-Path (Split-Path $PSScriptRoot -Parent) 'build-windows-emulator'
 function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
