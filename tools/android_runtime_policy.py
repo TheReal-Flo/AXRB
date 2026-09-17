@@ -22,6 +22,14 @@ def main():
     if run('shell', 'getprop ro.hardware') != 'ranchu':
         print(json.dumps({'status': 'skipped', 'reason': 'Not the AXRB emulator'})); return
     run('root'); run('wait-for-device')
+    # VR applications have no visible Android screen on which to dismiss the
+    # first-use immersive-mode prompt. Confirm it for the headless guest.
+    run('shell', 'settings put secure immersive_mode_confirmations confirmed')
+    # Stock API 36 revision 7 predates Mesa's opaque-handle debug-name fix.
+    # Scope the compatibility guard to the evaluated image, not application IDs.
+    fingerprint = run('shell', 'getprop ro.build.fingerprint')
+    debug_name_guard = fingerprint == 'google/sdk_gphone64_x86_64/emu64xa:16/BE2A.250530.026.F3/13894323:userdebug/dev-keys'
+    run('shell', 'setprop debug.axrb.gfxstream_debug_names ' + ('1' if debug_name_guard else '0'))
     limit = int(run('shell', 'cat /proc/sys/vm/max_map_count'))
     if limit < 1048576:
         run('shell', 'echo 1048576 > /proc/sys/vm/max_map_count')
@@ -57,7 +65,8 @@ def main():
     run('shell', 'settings put global gpu_debug_layers VK_LAYER_AXRB_runtime')
     run('shell', 'settings delete global gpu_debug_layer_app')
     run('shell', 'sync')
-    print(json.dumps({'status': 'ready', 'max_map_count': limit, 'vulkan_layer': remote}))
+    print(json.dumps({'status': 'ready', 'max_map_count': limit, 'vulkan_layer': remote,
+                      'gfxstream_debug_name_guard': debug_name_guard}))
 
 
 if __name__ == '__main__': main()

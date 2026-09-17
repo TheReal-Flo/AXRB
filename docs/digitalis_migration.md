@@ -57,10 +57,27 @@ AVD import remain to be implemented against the actual output artifacts.
 
 ## Current blocker
 
-At preparation time C: had approximately 6.3 GB free and was the only local
-filesystem drive. Lily was online in Tailscale, but SSH on port 22 timed out.
-A build location/access method is needed before source sync. No large download,
-image replacement, or source build has started.
+After the September 17 storage cleanup, C: has approximately 56 GiB free.
+Batman and Asgard were removed from the Android 14 emulator. Direct filesystem
+shrinking failed the Android boot check; the guest was recovered from the existing
+pre-expansion backup and the current AXRB runtime APK reinstalled. The replacement
+userdata image is standalone (no backing-file dependency), about 9 GiB allocated,
+with 64 GiB virtual capacity and about 61 GiB free in Android. The older
+`backup-before-64g` recovery copy remains available.
+
+Current Batman and Asgard saves were exported before maintenance to
+`%USERPROFILE%/.android/avd/axrb-games-api34.avd/preserved-game-saves-20260917.tgz`
+and `build-windows-emulator/axrb-preserved-game-saves.tgz`.
+SHA256: `4e7a5915e6afd626c44d516fb7df3972183d5e23d5b2cd0a09a5f926a3519b80`.
+These are recovery archives; restore the matching private/external app data after
+reinstalling the corresponding game, checking package UIDs, ownership, and SELinux
+labels. Saves are not currently restored into installed game packages. Download
+folders were not modified by this cleanup.
+
+There is now room for a separate emulator image, but still insufficient space for
+the roughly 400 GiB AOSP source/build workspace. Lily was online in Tailscale, but
+SSH on port 22 timed out. A build location/access method is still needed before
+source sync. No Android 16 image replacement or Digitalis source build has started.
 
 ## References
 

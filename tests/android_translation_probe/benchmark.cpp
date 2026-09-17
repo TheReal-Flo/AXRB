@@ -11,6 +11,15 @@ extern "C" jstring AtomicDiagnosticRun(JNIEnv*, jclass, jint);
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_axrb_mathprobe_MainActivity_run(JNIEnv* env, jclass cls, jint mode) {
     if (mode == 3 || mode == 4) return AtomicDiagnosticRun(env, cls, mode - 3);
+    if (mode == 6) {
+        using V = double __attribute__((vector_size(16)));
+        V root{4.0,16.0}, inverse{4.0,16.0};
+        asm volatile("frsqrte %0.2d, %0.2d" : "+w"(root));
+        asm volatile("frecpe %0.2d, %0.2d" : "+w"(inverse));
+        char detail[240];
+        snprintf(detail,sizeof(detail),"vector estimates: rsqrt(4,16)=(%.9g,%.9g) reciprocal(4,16)=(%.9g,%.9g)",root[0],root[1],inverse[0],inverse[1]);
+        return env->NewStringUTF(detail);
+    }
     if (mode == 5) {
         uint8_t byte = 7, swapped = 0x87;
         uint16_t half = 0x1234;

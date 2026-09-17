@@ -2,6 +2,7 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 #include <android/log.h>
+#include <sys/system_properties.h>
 #include <algorithm>
 #include <cstring>
 #include <map>
@@ -42,8 +43,31 @@ const char* alias(const char* name){
     return name;
 }
 PFN_vkVoidFunction intercept(const char*);
+bool brokenDebugNames(){
+    char value[PROP_VALUE_MAX]{};
+    __system_property_get("debug.axrb.gfxstream_debug_names",value);
+    return !std::strcmp(value,"1");
+}
+bool wrappedObject(VkObjectType type){
+    switch(type){
+    case VK_OBJECT_TYPE_INSTANCE: case VK_OBJECT_TYPE_PHYSICAL_DEVICE:
+    case VK_OBJECT_TYPE_DEVICE: case VK_OBJECT_TYPE_QUEUE:
+    case VK_OBJECT_TYPE_COMMAND_BUFFER: case VK_OBJECT_TYPE_COMMAND_POOL:
+    case VK_OBJECT_TYPE_BUFFER: case VK_OBJECT_TYPE_FENCE:
+    case VK_OBJECT_TYPE_SEMAPHORE: return true;
+    default: return false;
+    }
+}
 }
 extern "C" {
+// Mesa bf8862b49f18269ff41d88deab826bc5cea3141a: GFXStream's opaque
+// host handles are not vk_object_base pointers. Match the upstream guard
+// until the affected system image includes the driver fix.
+VKAPI_ATTR VkResult VKAPI_CALL vkSetDebugUtilsObjectNameEXT(VkDevice h,const VkDebugUtilsObjectNameInfoEXT* info){
+    if(brokenDebugNames()&&!wrappedObject(info->objectType))return VK_SUCCESS;
+    auto next=function<PFN_vkSetDebugUtilsObjectNameEXT>(device(h),"vkSetDebugUtilsObjectNameEXT");
+    return next?next(h,info):VK_ERROR_EXTENSION_NOT_PRESENT;
+}
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t* count,VkLayerProperties* out){
     if(!out){*count=1;return VK_SUCCESS;}if(!*count)return VK_INCOMPLETE;
     *out={};std::strcpy(out->layerName,layerName);std::strcpy(out->description,"AXRB Android runtime compatibility");
@@ -122,11 +146,17 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplateKHR(VkDevice h,VkDes
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplateKHR(VkDevice h,VkDescriptorSet s,VkDescriptorUpdateTemplate t,const void* d){vkUpdateDescriptorSetWithTemplate(h,s,t,d);}
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance h,const char* name){
     if(auto f=intercept(name))return f;
-    if(!h)return nullptr;auto s=instance(h);return s.gipa(h,alias(name));
+    // Extension entry points can be available when the corresponding core
+    // name is gated by the application's requested Vulkan API version.
+    if(!h)return nullptr;auto s=instance(h);auto f=s.gipa(h,name);
+    if(!f)f=s.gipa(h,alias(name));
+    return f;
 }
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice h,const char* name){
     if(auto f=intercept(name))return f;
-    if(!h)return nullptr;auto s=device(h);return s.gdpa(h,alias(name));
+    if(!h)return nullptr;auto s=device(h);auto f=s.gdpa(h,name);
+    if(!f)f=s.gdpa(h,alias(name));
+    return f;
 }
 }
 namespace {
@@ -136,6 +166,7 @@ PFN_vkVoidFunction intercept(const char* name){
     ENTRY(vkCreateInstance);ENTRY(vkDestroyInstance);ENTRY(vkCreateDevice);ENTRY(vkDestroyDevice);
     ENTRY(vkEnumerateInstanceLayerProperties);ENTRY(vkEnumerateDeviceLayerProperties);ENTRY(vkEnumerateInstanceExtensionProperties);
     ENTRY(vkEnumerateDeviceExtensionProperties);
+    ENTRY(vkSetDebugUtilsObjectNameEXT);
     ENTRY(vkCreateDescriptorUpdateTemplate);ENTRY(vkDestroyDescriptorUpdateTemplate);ENTRY(vkUpdateDescriptorSetWithTemplate);
     ENTRY(vkCreateDescriptorUpdateTemplateKHR);ENTRY(vkDestroyDescriptorUpdateTemplateKHR);ENTRY(vkUpdateDescriptorSetWithTemplateKHR);
 #undef ENTRY
