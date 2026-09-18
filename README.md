@@ -78,6 +78,10 @@ Meta requests and incomplete downloads instead of treating them as successful.
 The project does not bundle commercial games, ovrport, Meta credentials or
 Quest content. Users must supply games they are entitled to use.
 
+See [DISCLAIMER.md](DISCLAIMER.md) for the educational-use and lawful-content
+notice. AXRB does not endorse piracy, DRM circumvention or redistribution of
+copyrighted game files.
+
 ## License and attribution
 
 AXRB is licensed under the terms in [LICENSE](LICENSE). Third-party components

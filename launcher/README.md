@@ -119,3 +119,5 @@ have been checked live. Account-specific downloads/install/DLC still need a
 signed-in account test; fixture coverage is not an end-to-end Meta download test.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for RiftLift attribution.
+For educational-use and lawful-content requirements, see
+[../DISCLAIMER.md](../DISCLAIMER.md).
