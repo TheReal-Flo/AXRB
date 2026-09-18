@@ -34,6 +34,7 @@ export function SetupScreen({ setup }) {
       <div className="flex items-center gap-3" role="status"><Loader2 className="size-4 animate-spin" /><span>{labels[setup.phase] || setup.phase}{setup.component ? ` · ${setup.component}` : ''}</span>{setup.active && <span className="ml-auto tabular-nums text-sm text-muted-foreground" aria-label="Elapsed time">{elapsedText}</span>}</div>
       {setup.total > 0 && <><progress aria-label="Setup progress" value={setup.completed} max={setup.total} className="h-2 w-full accent-primary" /><div className="flex justify-between text-sm text-muted-foreground"><span>{setup.phase === 'download' ? `${(setup.completed / 1024 ** 2).toFixed(0)} / ${(setup.total / 1024 ** 2).toFixed(0)} MB` : 'Files'}</span><span>{percent}%</span></div></>}
       {setup.phase === 'boot' && <p className="text-sm text-muted-foreground">First boot can take a few minutes.</p>}
+      {setup.phase === 'boot' && setup.logs?.length > 0 && <pre aria-label="Android startup log" className="max-h-56 overflow-auto rounded-md bg-muted p-3 text-[11px] leading-4 text-muted-foreground whitespace-pre-wrap">{setup.logs.join('\n')}</pre>}
       {setup.active && <Button variant="outline" disabled={setup.cancelling} onClick={() => invoke('setupCancel')}>{setup.cancelling ? 'Stopping setup?' : 'Cancel'}</Button>}
     </> : <>
       <p>Download Android 16 and the emulator.</p>

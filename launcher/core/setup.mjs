@@ -43,12 +43,24 @@ export function avdConfig(image, settings) {
 export class Setup {
   constructor({ root, directory, runtime, components, save, changed, debug = false }) {
     Object.assign(this, { root, directory, runtime, components, save, changed, debug });
-    this.status = { phase: 'checking', directory, storageGB: runtime.settings?.storageGB ?? 32, completed: 0, total: 0, active: false, startedAt: 0, debug };
+    this.status = { phase: 'checking', directory, storageGB: runtime.settings?.storageGB ?? 32, completed: 0, total: 0, active: false, startedAt: 0, logs: [], debug };
   }
   update(value) {
     Object.assign(this.status, value);
     if (Object.keys(value).every(k => ['completed', 'total'].includes(k)) && Date.now() - (this.lastProgress || 0) < 100) return;
     this.lastProgress = Date.now(); this.changed();
+  }
+  appendLog(text) {
+    const lines = String(text || '').replaceAll('\r', '').split('\n').filter(Boolean);
+    if (!lines.length) return;
+    const logs = [...(this.status.logs || []), ...lines].slice(-120);
+    const now = Date.now();
+    if (now - (this.lastLogUpdate || 0) < 150 && logs.length < 120) {
+      this.status.logs = logs;
+      return;
+    }
+    this.lastLogUpdate = now;
+    this.update({ logs });
   }
   async runtimeHash() { return createHash('sha256').update(await fs.readFile(path.join(this.root, 'out/android/runtime-arm64-v8a/axrb-openxr-runtime-debug.apk'))).digest('hex'); }
   environment() {
@@ -89,7 +101,7 @@ export class Setup {
     this.runtime.settings.storageGB = storageGB;
     this.environment();
     this.controller = new AbortController();
-    this.update({ phase: 'download', directory: this.directory, active: true, startedAt: Date.now(), cancelling: false, error: '', completed: 0, total: 0 });
+    this.update({ phase: 'download', directory: this.directory, active: true, startedAt: Date.now(), cancelling: false, error: '', completed: 0, total: 0, logs: [] });
     this.task = this.install().catch(error => this.update({ phase: this.controller.signal.aborted ? 'cancelled' : 'error', error: this.controller.signal.aborted ? '' : error.message }))
       .finally(() => { this.update({ active: false }); this.controller = null; });
   }
@@ -151,14 +163,16 @@ export class Setup {
     await fs.mkdir(process.env.ANDROID_USER_HOME, { recursive: true });
     // A user-selected port can belong to another AVD. Never modify or stop it.
     if (await this.runtime.online()) throw new Error('The setup Android port is in use. Close that emulator and retry.');
-    this.update({ phase: 'boot', component: 'Starting Android', completed: 0, total: 0 });
+    this.update({ phase: 'boot', component: 'Starting Android', completed: 0, total: 0, logs: [] });
     try {
-      await this.runtime.ensure();
+      await this.runtime.ensure({ onOutput: text => this.appendLog(text) });
+      this.appendLog('Android boot completed; verifying GPU and ABI.');
       signal.throwIfAborted();
       this.update({ component: 'Installing AXRB runtime' });
       await this.runtime.adb(['install', '--no-incremental', '--force-queryable', '-r', path.join(this.root, 'out/android/runtime-arm64-v8a/axrb-openxr-runtime-debug.apk')], { timeout: 240000 });
       if (!(await this.runtime.adb(['shell', 'pm', 'path', 'com.axrb.openxrruntime'])).includes('package:')) throw new Error('Android did not register the AXRB runtime. Retry setup.');
       await this.runtime.adb(['shell', 'sync']);
+      this.appendLog('AXRB runtime installed and synchronized.');
       signal.throwIfAborted();
     } finally {
       const name = await this.runtime.adb(['emu', 'avd', 'name']).catch(() => '');

@@ -46,7 +46,7 @@ export class Runtime {
   constructor(root, settings) { this.root = root; this.settings = settings; this.child = null; this.game = null; }
   adb(args, options) { return run(path.join(this.settings.sdk, 'platform-tools/adb.exe'), ['-s', `emulator-${this.settings.port}`, ...args], options); }
   async online() { try { return (await this.adb(['get-state'], { timeout: 2500 })).trim() === 'device'; } catch { return false; } }
-  async ensure() {
+  async ensure({ onOutput = () => {} } = {}) {
     if (await this.online()) {
       const name = (await this.adb(['emu', 'avd', 'name'])).split(/\r?\n/)[0].trim();
       if (name !== this.settings.avd) throw new Error(`Android port is occupied by ${name}. Select that AVD or stop it first.`);
@@ -57,7 +57,7 @@ export class Runtime {
     await run('powershell.exe', powershellArgs(path.join(this.root, 'scripts/emulator/windows_android_emulator.ps1'), {
       Action: 'Start', Avd: this.settings.avd, Port: this.settings.port, Sdk: this.settings.sdk,
       ApiLevel: 36, Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, CpuCores: this.settings.cpuCores ?? 4, GuestClock: this.settings.guestClock || 'Default', GpuSharing: true
-    }), { timeout: (this.settings.guestClock || 'Default') === 'TscCorrected' ? 17 * 60 * 1000 : 10 * 60 * 1000 });
+    }), { timeout: (this.settings.guestClock || 'Default') === 'TscCorrected' ? 17 * 60 * 1000 : 10 * 60 * 1000, onOutput });
   }
   async inspect(apk, { allowSplit = false } = {}) {
     const data = JSON.parse(await run('python', [path.join(this.root, 'launcher/inspect_apk.py'), '--apk', apk, '--sdk', this.settings.sdk, ...(allowSplit ? ['--allow-split'] : [])]));
