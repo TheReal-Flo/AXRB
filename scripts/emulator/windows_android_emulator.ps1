@@ -172,6 +172,8 @@ switch ($Action) {
         # Android creates userdata and compiles system services.
         $startedAt = Get-Date
         $lastDiagnostic = $startedAt
+        $adbReconnectAttempted = $false
+        $adbServerRestarted = $false
         # Corrected TSC mode deliberately cold-boots Android and can spend
         # several minutes unpacking and registering APEX modules on first use.
         $bootTimeoutMinutes = if ($GuestClock -eq 'TscCorrected') { 15 } else { 8 }
@@ -190,6 +192,18 @@ switch ($Action) {
                 try { $adbState = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'get-state') 10) -join '' } catch { }
                 $adbText = $adbState.Trim(); if (!$adbText) { $adbText = 'offline' }
                 Write-Output ("Android startup diagnostic: {0}s elapsed; adb={1}; boot={2}; processExited={3}" -f [int]((Get-Date) - $startedAt).TotalSeconds, $adbText, ($boot -join '').Trim(), $process.HasExited)
+                if ($adbText -eq 'offline') {
+                    if (!$adbReconnectAttempted) {
+                        Write-Output 'Android startup diagnostic: reconnecting offline ADB transport.'
+                        try { Invoke-ExternalWithTimeout $adb @('reconnect', 'offline') 10 | Out-Null } catch { }
+                        $adbReconnectAttempted = $true
+                    } elseif (!$adbServerRestarted -and ((Get-Date) - $startedAt).TotalSeconds -ge 90) {
+                        Write-Output 'Android startup diagnostic: restarting ADB server after persistent offline transport.'
+                        try { Invoke-ExternalWithTimeout $adb @('kill-server') 15 | Out-Null } catch { }
+                        try { Invoke-ExternalWithTimeout $adb @('start-server') 15 | Out-Null } catch { }
+                        $adbServerRestarted = $true
+                    }
+                }
                 $lastDiagnostic = Get-Date
             }
             if ($process.HasExited) {
