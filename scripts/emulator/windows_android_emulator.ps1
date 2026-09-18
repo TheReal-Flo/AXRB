@@ -151,7 +151,10 @@ switch ($Action) {
         # Android creates userdata and compiles system services.
         $startedAt = Get-Date
         $lastDiagnostic = $startedAt
-        $deadline = $startedAt.AddMinutes(8)
+        # Corrected TSC mode deliberately cold-boots Android and can spend
+        # several minutes unpacking and registering APEX modules on first use.
+        $bootTimeoutMinutes = if ($GuestClock -eq 'TscCorrected') { 15 } else { 8 }
+        $deadline = $startedAt.AddMinutes($bootTimeoutMinutes)
         do {
             Start-Sleep -Seconds 2
             $ErrorActionPreference = 'Continue'
@@ -171,7 +174,7 @@ switch ($Action) {
                 throw "Emulator exited ($exitCode). Recent emulator output: $detail Logs: $logs\emulator.stdout.log and $logs\emulator.stderr.log"
             }
         } while ((Get-Date) -lt $deadline)
-        if ($boot -ne '1') { throw "Android did not finish booting within 8 minutes. Last emulator output: $(Read-LogTail) Logs: $logs\emulator.stdout.log and $logs\emulator.stderr.log" }
+        if ($boot -ne '1') { throw "Android did not finish booting within $bootTimeoutMinutes minutes. Last emulator output: $(Read-LogTail) Logs: $logs\emulator.stdout.log and $logs\emulator.stderr.log" }
         try { Verify-Gpu; Verify-Abi } catch {
             & $adb -s $serial emu kill | Out-Null
             throw

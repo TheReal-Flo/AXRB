@@ -57,7 +57,7 @@ export class Runtime {
     await run('powershell.exe', powershellArgs(path.join(this.root, 'scripts/emulator/windows_android_emulator.ps1'), {
       Action: 'Start', Avd: this.settings.avd, Port: this.settings.port, Sdk: this.settings.sdk,
       ApiLevel: 36, Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, CpuCores: this.settings.cpuCores ?? 4, GuestClock: this.settings.guestClock || 'Default', GpuSharing: true
-    }), { timeout: 10 * 60 * 1000 });
+    }), { timeout: (this.settings.guestClock || 'Default') === 'TscCorrected' ? 17 * 60 * 1000 : 10 * 60 * 1000 });
   }
   async inspect(apk, { allowSplit = false } = {}) {
     const data = JSON.parse(await run('python', [path.join(this.root, 'launcher/inspect_apk.py'), '--apk', apk, '--sdk', this.settings.sdk, ...(allowSplit ? ['--allow-split'] : [])]));
