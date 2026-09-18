@@ -215,7 +215,10 @@ state.data.settings = { sdk: path.join(process.env.LOCALAPPDATA || '', 'Android/
 runtime = new Runtime(root, state.data.settings);
 if (!smoke && (app.isPackaged || state.data.settings.managedDirectory || !await exists(path.join(state.data.settings.sdk, 'emulator/emulator.exe')))) {
   const managed = state.data.settings.managedDirectory || path.join(process.env.LOCALAPPDATA, 'AXRB Runtime');
-  if (!state.data.settings.managedDirectory) Object.assign(runtime.settings, { sdk: path.join(managed, 'sdk'), avd: 'axrb-managed-api36', port: 5584 });
+  // The setup receipt persists the managed root; derive all runtime paths from
+  // it on every launch so a previous install never falls back to the user's
+  // unrelated default SDK, AVD or emulator port.
+  Object.assign(runtime.settings, { sdk: path.join(managed, 'sdk'), avd: 'axrb-managed-api36', port: 5584 });
   setup = new Setup({ root, directory: managed, runtime,
     components: JSON.parse(await fs.readFile(path.join(directory, 'core/components.json'), 'utf8')),
     save: async value => { state.data.settings.managedDirectory = value; await persist(); }, changed, debug });
