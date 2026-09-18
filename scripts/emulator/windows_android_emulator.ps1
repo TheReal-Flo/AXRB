@@ -16,7 +16,6 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../paths.ps1"
 . "$PSScriptRoot/gpu_validation.ps1"
-$env:ANDROID_ADB_SERVER_ADDRESS = '127.0.0.1'
 $env:ANDROID_ADB_SERVER_PORT = '5038'
 $env:ADB_SERVER_SOCKET = $null
 if ($Port % 2) { throw 'Emulator console port must be even.' }
@@ -55,6 +54,20 @@ function Invoke-ExternalWithTimeout([string]$Exe, [string[]]$Arguments, [int]$Ti
     } finally {
         Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
     }
+}
+function Stop-StaleManagedEmulator {
+    # PowerShell/CIM reports quoted command-line arguments for some launches;
+    # match the validated AVD name itself so both forms are caught.
+    $patternAvd = [regex]::Escape($Avd)
+    $candidates = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and $_.CommandLine -match $patternAvd -and
+        $_.Name -match '^(qemu-system-x86_64-headless|emulator|axrb_clock_launcher)\.exe$'
+    }
+    foreach ($candidate in $candidates | Sort-Object @{ Expression = { if ($_.Name -like 'qemu*') { 0 } else { 1 } } }) {
+        Write-Output "Android startup diagnostic: stopping stale $($candidate.Name) (pid $($candidate.ProcessId))."
+        Stop-Process -Id $candidate.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($candidates) { Start-Sleep -Seconds 2 }
 }
 function Verify-Gpu {
     Write-Output 'Android startup diagnostic: checking guest GLES renderer.'
@@ -108,8 +121,26 @@ switch ($Action) {
             $freeGB = (Get-PSDrive -Name $drive.TrimEnd(':\') -ErrorAction SilentlyContinue).Free / 1GB
             if ($freeGB -and $freeGB -lt 8) { Write-Warning ("Android startup diagnostic: only {0:N1} GB is free on {1}." -f $freeGB, $drive) }
         }
-        $devices = & $adb devices
-        if ($devices -match "^$serial\s") { throw "$serial already exists; use Verify or Stop first." }
+        # Start the isolated local server explicitly.  Supplying only
+        # ANDROID_ADB_SERVER_PORT keeps this a local daemon; setting
+        # ANDROID_ADB_SERVER_ADDRESS makes adb treat it as a remote server and
+        # prevents the client from starting it automatically.
+        Invoke-ExternalWithTimeout $adb @('start-server') 15 | Out-Null
+        $devices = Invoke-ExternalWithTimeout $adb @('devices') 15
+        $existingState = ''
+        if ($devices -match "^$serial\s") {
+            try { $existingState = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'get-state') 10).Trim() } catch { }
+            if ($existingState -eq 'device') { throw "$serial is already running; use Verify or Stop first." }
+            Write-Output "Android startup diagnostic: $serial is offline; cleaning up its stale managed emulator."
+        }
+        # A previous AXRB launch may have registered with another ADB server
+        # (for example the default 5037 daemon), so it would not appear above
+        # even though it still holds this AVD.  Once a healthy instance was
+        # ruled out, remove any same-AVD process before starting a replacement.
+        if ($existingState -ne 'device') {
+            Stop-StaleManagedEmulator
+            try { Invoke-ExternalWithTimeout $adb @('reconnect', 'offline') 10 | Out-Null } catch { }
+        }
         # Managed installations should reuse Android's quick-boot snapshot. Older
         # AXRB images were created with cold-boot settings; migrate that setting
         # in place so every launch does not rebuild Android from scratch.
