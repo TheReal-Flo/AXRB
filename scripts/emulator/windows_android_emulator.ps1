@@ -101,7 +101,6 @@ switch ($Action) {
         }
         New-Item -ItemType Directory -Force $logs | Out-Null
         $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-boot-anim', '-memory', "$MemoryMB")
-        if ($env:AXRB_DATA_HOME) { $arguments += @('-feature', '-QuickbootFileBacked') }
         if ($PSBoundParameters.ContainsKey('CpuCores')) { $arguments += @('-cores', "$CpuCores") }
         if (!$ShowWindow) { $arguments += '-no-window' }
         if ($GuestClock -ne 'Default') {
