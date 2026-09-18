@@ -3,7 +3,7 @@
   "version": "0.1.1",
   "private": true,
   "description": "Quest library and native Windows AXRB launcher",
-  "license": "GPL-3.0-or-later",
+  "license": "MIT",
   "type": "module",
   "main": "main.mjs",
   "scripts": {

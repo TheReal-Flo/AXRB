@@ -5,8 +5,9 @@
 The Meta native-SSO protocol in `core/meta.mjs` is adapted from
 [RiftLift's meta_auth.py](https://github.com/Villagers654/RiftLift/blob/8eddda67d18eace7935d5d385656ed897e4e6c50/src/riftlift/meta_auth.py),
 revision `8eddda67d18eace7935d5d385656ed897e4e6c50`, by RiftLift contributors.
-RiftLift is licensed under GPL-3.0-or-later. This launcher is distributed under
-the same license; see LICENSE. Changes include a JavaScript implementation,
+RiftLift is licensed under GPL-3.0-or-later. The RiftLift-derived code remains
+under that license. AXRB's original code is MIT-licensed; see the repository
+LICENSE. Changes include a JavaScript implementation,
 Electron-hosted Meta login, Windows credential encryption, and callback handling
 without replacing the user's system-wide Oculus protocol association.
 

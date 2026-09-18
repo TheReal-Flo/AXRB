@@ -21,7 +21,7 @@ The script keeps the version from `launcher/package.json`, runs the launcher tes
 and writes `SHA256SUMS-<version>.txt`. Use `-SkipNative` when only launcher files
 changed and the existing native/runtime artifacts are still current; use
 `-SkipTests` only for a packaging retry after tests have already passed.
-Distribute the source archive alongside the GPL launcher installer.
+Distribute the source archive alongside the MIT-licensed launcher installer.
 Code signing uses electron-builder's standard certificate environment variables;
 without a signing certificate, the installer is unsigned.
 
