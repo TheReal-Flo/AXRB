@@ -34,11 +34,31 @@ function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed ($LASTEXITCODE)" }
 }
+function Invoke-ExternalWithTimeout([string]$Exe, [string[]]$Arguments, [int]$TimeoutSeconds = 30) {
+    $token = [guid]::NewGuid().ToString('N')
+    $stdout = Join-Path $env:TEMP "axrb-$token.out"
+    $stderr = Join-Path $env:TEMP "axrb-$token.err"
+    $quoted = $Arguments | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }
+    try {
+        $process = Start-Process -FilePath $Exe -ArgumentList ($quoted -join ' ') -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        if (!$process.WaitForExit($TimeoutSeconds * 1000)) {
+            $process.Kill(); $process.WaitForExit(5000)
+            throw "$Exe timed out after $TimeoutSeconds seconds."
+        }
+        $output = if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue } else { '' }
+        $error = if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue } else { '' }
+        if ($process.ExitCode -ne 0) { throw (($error + $output).Trim() + " (exit $($process.ExitCode))") }
+        return $output
+    } finally {
+        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    }
+}
 function Verify-Gpu {
-    $gles = (& $adb -s $serial shell dumpsys SurfaceFlinger | Select-String '^GLES:') -join "`n"
-    if ($LASTEXITCODE -ne 0 -or !$gles) { throw 'Cannot identify guest GLES renderer.' }
-    $raw = & $adb -s $serial shell cmd gpu vkjson
-    if ($LASTEXITCODE -ne 0) { throw 'Guest Vulkan query failed.' }
+    Write-Output 'Android startup diagnostic: checking guest GLES renderer.'
+    $gles = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'shell', 'dumpsys', 'SurfaceFlinger') 30 | Select-String '^GLES:') -join "`n"
+    if (!$gles) { throw 'Cannot identify guest GLES renderer.' }
+    Write-Output 'Android startup diagnostic: checking guest Vulkan device.'
+    $raw = Invoke-ExternalWithTimeout $adb @('-s', $serial, 'shell', 'cmd', 'gpu', 'vkjson') 60
     $vk = ($raw -join "`n") | ConvertFrom-Json
     $devices = @($vk.devices)
     Assert-AxrbGuestGpu -Gles $gles -Devices $devices
@@ -49,8 +69,9 @@ function Verify-Gpu {
     $devices | ForEach-Object { Write-Host "Vulkan: $($_.properties.deviceName) (vendor $($_.properties.vendorID), type $($_.properties.deviceType))" }
 }
 function Verify-Abi {
-    $abis = (& $adb -s $serial shell getprop ro.product.cpu.abilist) -join ''
-    if ($LASTEXITCODE -ne 0 -or $Abi -notin $abis.Trim().Split(',')) {
+    Write-Output 'Android startup diagnostic: checking guest ABI.'
+    $abis = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'shell', 'getprop', 'ro.product.cpu.abilist') 30) -join ''
+    if ($Abi -notin $abis.Trim().Split(',')) {
         throw "Guest does not support requested ABI $Abi (advertised: $abis)."
     }
     if ($Abi -eq 'arm64-v8a') {
@@ -158,11 +179,11 @@ switch ($Action) {
         do {
             Start-Sleep -Seconds 2
             $ErrorActionPreference = 'Continue'
-            $boot = & $adb -s $serial shell getprop sys.boot_completed 2>$null
+            $boot = Invoke-ExternalWithTimeout $adb @('-s', $serial, 'shell', 'getprop', 'sys.boot_completed') 10
             $ErrorActionPreference = 'Stop'
             if ($boot -eq '1') { break }
             if (((Get-Date) - $lastDiagnostic).TotalSeconds -ge 30) {
-                $adbState = (& $adb -s $serial get-state 2>$null) -join ''
+                $adbState = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'get-state') 10) -join ''
                 $adbText = $adbState.Trim(); if (!$adbText) { $adbText = 'offline' }
                 Write-Output ("Android startup diagnostic: {0}s elapsed; adb={1}; boot={2}; processExited={3}" -f [int]((Get-Date) - $startedAt).TotalSeconds, $adbText, ($boot -join '').Trim(), $process.HasExited)
                 $lastDiagnostic = Get-Date
@@ -175,7 +196,7 @@ switch ($Action) {
             }
         } while ((Get-Date) -lt $deadline)
         if ($boot -ne '1') { throw "Android did not finish booting within $bootTimeoutMinutes minutes. Last emulator output: $(Read-LogTail) Logs: $logs\emulator.stdout.log and $logs\emulator.stderr.log" }
-        try { Verify-Gpu; Verify-Abi } catch {
+        try { Verify-Gpu; Verify-Abi; Write-Output 'Android startup diagnostic: guest verification complete.' } catch {
             & $adb -s $serial emu kill | Out-Null
             throw
         }
