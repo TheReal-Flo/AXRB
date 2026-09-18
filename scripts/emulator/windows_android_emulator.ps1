@@ -23,6 +23,13 @@ $serial = "emulator-$Port"
 if (!$RuntimeApk) { $RuntimeApk = "$AxrbAssets/android/runtime-$Abi/axrb-openxr-runtime-debug.apk" }
 $image = "system-images;android-$ApiLevel;google_apis;x86_64"
 $logs = Join-Path $AxrbOut 'logs/emulator'
+function Require-Path([string]$Path, [string]$Description) {
+    if (!(Test-Path -LiteralPath $Path)) { throw "Android startup diagnostic: $Description was not found at $Path" }
+}
+function Read-LogTail {
+    $files = @("$logs\emulator.stdout.log", "$logs\emulator.stderr.log")
+    (($files | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-Content -LiteralPath $_ -Tail 12 -ErrorAction SilentlyContinue }) -join ' ').Trim()
+}
 function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed ($LASTEXITCODE)" }
@@ -64,7 +71,18 @@ switch ($Action) {
         }
     }
     Start {
+        Require-Path $adb 'ADB executable'
+        Require-Path $emulator 'Android emulator executable'
+        if ($env:ANDROID_AVD_HOME) { Require-Path (Join-Path $env:ANDROID_AVD_HOME "$Avd.avd\config.ini") 'managed AVD configuration' }
+        $systemImage = Join-Path $Sdk "system-images\android-$ApiLevel\google_apis\x86_64\system.img"
+        Require-Path $systemImage 'Android system image'
         Run $emulator @('-accel-check')
+        Write-Host "Android startup diagnostic: SDK=$Sdk; AVD=$Avd; port=$Port; image=$systemImage"
+        $drive = [IO.Path]::GetPathRoot($(if ($env:ANDROID_AVD_HOME) { $env:ANDROID_AVD_HOME } else { $Sdk }))
+        if ($drive) {
+            $freeGB = (Get-PSDrive -Name $drive.TrimEnd(':\') -ErrorAction SilentlyContinue).Free / 1GB
+            if ($freeGB -and $freeGB -lt 8) { Write-Warning ("Android startup diagnostic: only {0:N1} GB is free on {1}." -f $freeGB, $drive) }
+        }
         $devices = & $adb devices
         if ($devices -match "^$serial\s") { throw "$serial already exists; use Verify or Stop first." }
         # Managed installations should reuse Android's quick-boot snapshot. Older
@@ -126,19 +144,27 @@ switch ($Action) {
         }
         # First boot after installing an image can take several minutes while
         # Android creates userdata and compiles system services.
-        $deadline = (Get-Date).AddMinutes(8)
+        $startedAt = Get-Date
+        $lastDiagnostic = $startedAt
+        $deadline = $startedAt.AddMinutes(8)
         do {
             Start-Sleep -Seconds 2
             $ErrorActionPreference = 'Continue'
             $boot = & $adb -s $serial shell getprop sys.boot_completed 2>$null
             $ErrorActionPreference = 'Stop'
             if ($boot -eq '1') { break }
+            if (((Get-Date) - $lastDiagnostic).TotalSeconds -ge 30) {
+                $adbState = (& $adb -s $serial get-state 2>$null) -join ''
+                $adbText = $adbState.Trim(); if (!$adbText) { $adbText = 'offline' }
+                Write-Host ("Android startup diagnostic: {0}s elapsed; adb={1}; boot={2}; processExited={3}" -f [int]((Get-Date) - $startedAt).TotalSeconds, $adbText, ($boot -join '').Trim(), $process.HasExited)
+                $lastDiagnostic = Get-Date
+            }
             if ($process.HasExited) {
                 $detail = Get-Content "$logs/emulator.stdout.log", "$logs/emulator.stderr.log" -ErrorAction SilentlyContinue | Where-Object { $_ -match 'FATAL|ERROR|failed' } | Select-Object -Last 3
                 throw "Emulator exited ($($process.ExitCode)). $($detail -join ' ') See $logs"
             }
         } while ((Get-Date) -lt $deadline)
-        if ($boot -ne '1') { throw "Android did not finish booting within 8 minutes; see $logs\emulator.stdout.log and $logs\emulator.stderr.log" }
+        if ($boot -ne '1') { throw "Android did not finish booting within 8 minutes. Last emulator output: $(Read-LogTail) Logs: $logs\emulator.stdout.log and $logs\emulator.stderr.log" }
         try { Verify-Gpu; Verify-Abi } catch {
             & $adb -s $serial emu kill | Out-Null
             throw
