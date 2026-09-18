@@ -108,6 +108,12 @@ switch ($Action) {
             # QEMU's extra kernel options are appended to the Android defaults.
             $arguments += @('-show-kernel', '-qemu', '-append', 'clocksource=tsc')
         }
+        if ($GuestClock -eq 'TscCorrected') {
+            # The clock-correction launcher cannot safely combine its host clock
+            # shim with a persisted Android snapshot. Keep normal launches on
+            # quick boot, but make the corrected-clock mode explicit and cold.
+            $arguments += '-no-snapshot'
+        }
         $oldLayerPath = $env:VK_LAYER_PATH
         $oldLayers = $env:VK_INSTANCE_LAYERS
         $oldPath = $env:PATH
