@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,8 +9,16 @@ export function SetupScreen({ setup }) {
   const [accepted, setAccepted] = useState(false);
   const [storageGB, setStorageGB] = useState(setup.storageGB ?? 32);
   const [error, setError] = useState('');
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!setup.active || !setup.startedAt) return undefined;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [setup.active, setup.startedAt]);
   const invoke = async (name, value) => { try { setError(''); return await call(name, value); } catch (e) { setError(e.message); } };
   const percent = setup.total ? Math.min(100, Math.floor(setup.completed / setup.total * 100)) : 0;
+  const elapsed = setup.active && setup.startedAt ? Math.max(0, Math.floor((now - setup.startedAt) / 1000)) : 0;
+  const elapsedText = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`;
   const labels = { checking: 'Checking your PC', download: 'Downloading', verify: 'Verifying download', extract: 'Extracting', boot: 'Preparing Android' };
   return <main className="flex min-h-screen items-center justify-center p-10"><section className="w-full max-w-lg space-y-6" aria-label="Runtime setup">
     <h1 className="text-xl font-semibold">AXRB</h1>
@@ -23,7 +31,7 @@ export function SetupScreen({ setup }) {
       <ol className="list-decimal space-y-2 pl-5 text-sm text-muted-foreground"><li>Open Windows Features and enable <strong>Windows Hypervisor Platform</strong>.</li><li>Restart your PC, then reopen AXRB.</li><li>If it remains unavailable, enable Intel VT-x or AMD SVM in your BIOS.</li></ol>
       <div className="flex gap-3"><Button onClick={() => invoke('setupFeatures')}>Windows Features</Button><Button variant="outline" onClick={() => invoke('setupCheck')}>Check again</Button></div>
     </> : setup.active || setup.phase === 'checking' ? <>
-      <div className="flex items-center gap-3" role="status"><Loader2 className="size-4 animate-spin" /><span>{labels[setup.phase] || setup.phase}{setup.component ? ` · ${setup.component}` : ''}</span></div>
+      <div className="flex items-center gap-3" role="status"><Loader2 className="size-4 animate-spin" /><span>{labels[setup.phase] || setup.phase}{setup.component ? ` · ${setup.component}` : ''}</span>{setup.active && <span className="ml-auto tabular-nums text-sm text-muted-foreground" aria-label="Elapsed time">{elapsedText}</span>}</div>
       {setup.total > 0 && <><progress aria-label="Setup progress" value={setup.completed} max={setup.total} className="h-2 w-full accent-primary" /><div className="flex justify-between text-sm text-muted-foreground"><span>{setup.phase === 'download' ? `${(setup.completed / 1024 ** 2).toFixed(0)} / ${(setup.total / 1024 ** 2).toFixed(0)} MB` : 'Files'}</span><span>{percent}%</span></div></>}
       {setup.phase === 'boot' && <p className="text-sm text-muted-foreground">First boot can take a few minutes.</p>}
       {setup.active && <Button variant="outline" disabled={setup.cancelling} onClick={() => invoke('setupCancel')}>{setup.cancelling ? 'Stopping setup?' : 'Cancel'}</Button>}

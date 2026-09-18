@@ -43,7 +43,7 @@ export function avdConfig(image, settings) {
 export class Setup {
   constructor({ root, directory, runtime, components, save, changed, debug = false }) {
     Object.assign(this, { root, directory, runtime, components, save, changed, debug });
-    this.status = { phase: 'checking', directory, storageGB: runtime.settings?.storageGB ?? 32, completed: 0, total: 0, active: false, debug };
+    this.status = { phase: 'checking', directory, storageGB: runtime.settings?.storageGB ?? 32, completed: 0, total: 0, active: false, startedAt: 0, debug };
   }
   update(value) {
     Object.assign(this.status, value);
@@ -89,7 +89,7 @@ export class Setup {
     this.runtime.settings.storageGB = storageGB;
     this.environment();
     this.controller = new AbortController();
-    this.update({ phase: 'download', directory: this.directory, active: true, cancelling: false, error: '', completed: 0, total: 0 });
+    this.update({ phase: 'download', directory: this.directory, active: true, startedAt: Date.now(), cancelling: false, error: '', completed: 0, total: 0 });
     this.task = this.install().catch(error => this.update({ phase: this.controller.signal.aborted ? 'cancelled' : 'error', error: this.controller.signal.aborted ? '' : error.message }))
       .finally(() => { this.update({ active: false }); this.controller = null; });
   }
