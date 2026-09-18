@@ -56,3 +56,6 @@ launcher/dist/
 *.bak
 *.swp
 *~
+
+# Persistent local keys and rollback state
+.local/

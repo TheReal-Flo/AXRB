@@ -3,18 +3,43 @@
 A native Windows desktop frontend for the AXRB runtime: your installed Android
 games, the live Quest storefront, owned-game downloads, expansion files and DLC.
 
-## Run
+## Install
+
+Run `AXRB-Setup-0.1.1.exe`. First-run setup checks Windows Hypervisor Platform,
+explains how to enable it if needed, and downloads the pinned Android 16 runtime
+from Google after license acceptance. Choose a drive and Android disk size;
+setup checks available space before downloading. Games and ovrport are not bundled.
+This build requires Windows x64, an AMD or NVIDIA GPU, at least 12 GB RAM, and an active
+OpenXR runtime such as SteamVR.
+
+## Build an installer
+
+From a configured Windows development checkout, run
+`powershell -ExecutionPolicy Bypass -File launcher/build.ps1`.
+The NSIS installer and matching source archive are written to `out/releases`.
+The script keeps the version from `launcher/package.json`, runs the launcher tests,
+and writes `SHA256SUMS-<version>.txt`. Use `-SkipNative` when only launcher files
+changed and the existing native/runtime artifacts are still current; use
+`-SkipTests` only for a packaging retry after tests have already passed.
+Distribute the source archive alongside the GPL launcher installer.
+Code signing uses electron-builder's standard certificate environment variables;
+without a signing certificate, the installer is unsigned.
+
+## Develop
 
 Requires Node.js 24+, Python, and the project's existing Android SDK/Windows AXRB
 setup. From the project root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/run_launcher.ps1
+powershell -ExecutionPolicy Bypass -File scripts/run/run_launcher.ps1
 ```
 
 The first launch installs the locked npm dependencies and downloads Electron.
 You can also double-click **AXRB Launcher.cmd** in the project root.
 For development: `cd launcher; npm ci; npm start`.
+  To bypass GPU, memory, and architecture checks while debugging setup, launch the
+  development or packaged app with `--axrb-debug` (the hypervisor check remains
+  active). `AXRB_DEBUG=1` is also accepted for scripted launches.
 
 The renderer uses React, Tailwind CSS and local shadcn/ui components. Vite builds
 it into `dist/`; both start commands rebuild before opening Electron. No local
@@ -47,20 +72,20 @@ Source components are in `ui/`, with shared shadcn components in `ui/components/
 - **Patch:** Optionally configure the ovrport **CLI** `.exe` or `.jar` in Settings
   (the JAR requires Java). It writes a separate `-axrb.apk`; installation remains
   a separate explicit action. General patching does not guarantee every game's
-  compatibility with AXRB. Existing game-specific runtime compatibility work is
-  not automatically applied to new downloads.
+  compatibility with AXRB.
 - **Install:** Uses `adb install -r`, preserving app data. Signature conflicts
   report an error; the launcher does not uninstall the existing app. Assets are
   pushed into `/sdcard/Android/obb/<package>/`. After downloading more content,
   use **Update installation** to copy it into Android.
-- **Play:** Calls `tools/run_windows_game.ps1`, preserving automatic OpenXR eye
+- **Play:** Calls `scripts/run/run_windows_game.ps1`, preserving automatic OpenXR eye
   resolution, SteamVR name/icon, GPU texture sharing, and the save-aware shutdown.
   Closing the game preview stops the game. Closing the launcher does not
   intentionally stop a running game; stop it with its preview window.
 
-The current default AVD is `axrb-games-api34` on port 5580 with 8 GB guest RAM.
-Change these in Settings for another existing AXRB setup. The launcher does not
-provision WHPX, SteamVR, the system image, or an AVD from scratch.
+Managed installations use `axrb-managed-api36` on port 5584 with four vCPUs and
+8 GB guest RAM. Android, downloads and logs live outside the application folder
+and survive launcher updates/uninstallation. Development checkouts can continue
+using an existing SDK and AVD. Windows features and SteamVR remain user-installed.
 
 ## Data and limitations
 
@@ -83,7 +108,7 @@ npm run smoke --prefix launcher
 Unit tests cover Quest filtering, SSO challenge validation, DLC entitlement
 selection, APK/OBB plans, download integrity/resume, unsafe paths/redirects, atomic
 library persistence and shell argument handling. The desktop smoke test uses a
-separate `build-launcher-smoke` profile, navigates Library/Settings/Downloads,
+separate `out/launcher/smoke` profile, navigates Library/Settings/Downloads,
 queries the live Quest store, adds a listing to that test profile, checks filters,
 dialog/menu keyboard focus, progress display, and the minimum window width.
 It also checks that state updates preserve text being edited. Screenshots are

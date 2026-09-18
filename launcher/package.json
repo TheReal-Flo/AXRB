@@ -1,6 +1,6 @@
 {
   "name": "axrb-launcher",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Quest library and native Windows AXRB launcher",
   "license": "GPL-3.0-or-later",
@@ -10,12 +10,15 @@
     "start": "node start.cjs",
     "test": "node --test tests/*.test.mjs",
     "smoke": "node start.cjs --smoke-test",
-    "build": "vite build"
+    "build": "npm run build:quest && vite build",
+    "build:quest": "powershell -NoProfile -ExecutionPolicy Bypass -File device/build.ps1",
+    "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/build/installer.ps1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "electron": "44.4.1",
+    "electron-builder": "^26.15.3",
     "tailwindcss": "^4.3.3",
     "vite": "^8.3.0"
   },
@@ -26,6 +29,55 @@
     "radix-ui": "^1.6.7",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "tailwind-merge": "^3.7.0"
+    "tailwind-merge": "^3.7.0",
+    "yauzl": "^3.4.0"
+  },
+  "productName": "AXRB",
+  "author": "AXRB contributors",
+  "build": {
+    "appId": "org.axrb.launcher",
+    "productName": "AXRB",
+    "directories": {
+      "output": "../out/releases"
+    },
+    "files": [
+      "main.mjs",
+      "preload.cjs",
+      "core/**",
+      "dist/**",
+      "assets/axrb.ico",
+      "assets/quest-catalog.jar",
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ],
+    "extraResources": [
+      {
+        "from": "../out/distribution/resources",
+        "to": "."
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "AXRB-Setup-${version}.${ext}",
+      "icon": "assets/axrb.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "AXRB",
+      "runAfterFinish": false
+    },
+    "beforePack": "./verify-release.cjs"
   }
 }

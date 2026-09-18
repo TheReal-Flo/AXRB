@@ -25,7 +25,7 @@ app.whenReady().then(async () => {
       catch (e) { report.dlcError = e.message; }
     }
   } catch (error) { report.error = error.message; }
-  await fs.mkdir(path.join(root,'build-launcher-validation'),{recursive:true});
-  await fs.writeFile(path.join(root,'build-launcher-validation/meta-report.json'),JSON.stringify(report,null,2));
+  await fs.mkdir(path.join(root,'out/launcher/validation'),{recursive:true});
+  await fs.writeFile(path.join(root,'out/launcher/validation/meta-report.json'),JSON.stringify(report,null,2));
   console.log(JSON.stringify(report));app.quit();
 }).catch(() => { console.error('Live validation could not open the encrypted Meta session. Sign in first.'); app.exit(1); });

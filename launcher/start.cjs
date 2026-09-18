@@ -2,6 +2,11 @@ const { spawn } = require('node:child_process');
 const environment = { ...process.env };
 // Editors may set this for their own helpers; AXRB needs Electron's GUI mode.
 delete environment.ELECTRON_RUN_AS_NODE;
+// `--axrb-debug` is an AXRB application flag. Do not pass it to Electron itself.
+const forwarded = process.argv.slice(2);
+const debug = forwarded.includes('--axrb-debug') || forwarded.includes('--debug');
+const applicationArgs = forwarded.filter(argument => argument !== '--axrb-debug' && argument !== '--debug');
+if (debug) environment.AXRB_DEBUG = '1';
 // Build on launch so both npm start and the desktop shortcut use current sources.
 const build = spawn(process.execPath, [require('node:path').join(require.resolve('vite/package.json'), '..', 'bin', 'vite.js'), 'build'], {
   cwd: __dirname, env: environment, stdio: 'inherit', windowsHide: true
@@ -9,7 +14,7 @@ const build = spawn(process.execPath, [require('node:path').join(require.resolve
 build.on('error', error => { console.error(error.message); process.exit(1); });
 build.on('exit', code => {
   if (code !== 0) return process.exit(code ?? 1);
-  const child = spawn(require('electron'), [__dirname, ...process.argv.slice(2)], {
+  const child = spawn(require('electron'), [__dirname, ...applicationArgs], {
     cwd: __dirname, env: environment, stdio: 'inherit', windowsHide: false
   });
   child.on('exit', code => process.exit(code ?? 1));

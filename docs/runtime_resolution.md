@@ -33,18 +33,3 @@ Change resolution through the PC OpenXR runtime (SteamVR in this setup), then
 restart the AXRB game session. Resolution is negotiated at startup; hot-resizing
 an existing game's swapchains is not implemented. Engines may still apply their
 own render scale. Higher recommended resolutions increase rendering/memory cost.
-
-## Validation
-
-- Six Windows CTest cases pass, including non-square 2880x3200 Android view
-  reporting, fragmented v4 records, v3 compatibility and 5120x2880 GPU metadata.
-- ARM64 runtime APK and Windows host/export layer build successfully.
-- Real ARM64 Vulkan test passes UNORM/sRGB stereo pixel verification while changing
-  output sizes between 512x384 and 1536x1024, exercising staging growth, image
-  recreation, cropping, resampling, orientation and reuse.
-- Previous binaries/runtime APK are in `build-pinball/resolution-backup/`.
-- Live Pinball validation: SteamVR recommended **2444x2580**; the host swapchain,
-  Android view recommendation and captured shared GPU eye textures all matched.
-  The arcade room renders in both eyes, and 2216x786 loading-panel transitions
-  completed without pixel fallback. Evidence: `build-pinball/resolution-host.log`,
-  `resolution-guest.log` and `resolution-stereo.png`. Game left running.

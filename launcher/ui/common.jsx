@@ -3,7 +3,7 @@ import { Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
-export const activeStatuses = ['queued', 'downloading', 'installing', 'patching'];
+export const activeStatuses = ['queued', 'downloading', 'installing', 'patching', 'importing', 'uninstalling'];
 export const bytes = n => n ? `${(n / 1024 ** 3).toFixed(n < 1024 ** 3 ? 2 : 1)} GB` : '0 GB';
 export async function call(method, ...args) {
   const result = await window.axrb[method](...args);

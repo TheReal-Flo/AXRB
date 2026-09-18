@@ -1,5 +1,6 @@
 #include "image_transport.h"
 #include "windows_gpu_frame.h"
+#include "gpu_frame_packet.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -152,17 +153,20 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
                 break;
             }
 
+            const bool empty = header.version == kEmptyImageFrameVersion;
+            const bool batch = header.version == kGpuBatchFrameVersion;
             const bool mixed = mixed_gpu_version(header.version);
             const bool quads = header.version == kQuadImageFrameVersion || header.version == kQuadGpuFrameVersion || header.version == kMixedQuadGpuFrameVersion;
-            const bool gpu = header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion || mixed;
-            const bool projected = header.version == kProjectionImageFrameVersion || gpu || quads;
+            const bool gpu = empty || batch || header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion || equirect_gpu_version(header.version) || mixed;
+            const bool projected = !empty && (header.version == kProjectionImageFrameVersion || gpu || quads || equirect_version(header.version));
             const uint32_t expectedHeaderSize = sizeof(ImageFrameHeader) + (projected ? sizeof(ImageProjection) : 0);
-            if ((mixed ? !valid_mixed_part(header.version, header.reserved) : header.reserved != 0) || header.magic != kImageFrameMagic ||
-                (header.version != kImageFrameVersion && !projected) ||
+            if ((batch ? (header.reserved < 2 || header.reserved > kMaxWireCompositionLayers) : mixed ? !valid_mixed_part(header.version, header.reserved) : header.reserved != 0) || header.magic != kImageFrameMagic ||
+                (header.version != kImageFrameVersion && !empty && !projected) ||
                 header.type != (gpu ? kWindowsGpuFrameType : kImageFrameTypeRgba8) || header.header_size != expectedHeaderSize ||
                 header.format != kImageFrameFormatRgba8 ||
-                header.bytes_per_pixel != 4 || !header.width || !header.height ||
-                !valid_render_extent(header.width, header.height) || !header.layers || header.layers > 4 ||
+                header.bytes_per_pixel != 4 ||
+                (empty ? (header.width || header.height || header.layers || header.sequence == UINT64_MAX) :
+                    (!valid_render_extent(header.width, header.height) || !header.layers || header.layers > 4)) ||
                 (projected && header.layers != 2)) {
                 std::fprintf(stderr, "AXRB Image TCP: invalid image header\n");
                 close_socket(client);
@@ -170,7 +174,7 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             }
 
             const uint64_t expected =
-                gpu ? sizeof(WindowsGpuFrame) : static_cast<uint64_t>(header.width) * header.height * header.layers * header.bytes_per_pixel;
+                empty ? 0 : batch ? header.reserved * sizeof(GpuBatchPart) : gpu ? sizeof(WindowsGpuFrame) : static_cast<uint64_t>(header.width) * header.height * header.layers * header.bytes_per_pixel;
             if (header.payload_size != expected || header.payload_size > 128ull * 1024ull * 1024ull) {
                 std::fprintf(stderr, "AXRB Image TCP: invalid payload size %llu\n",
                     static_cast<unsigned long long>(header.payload_size));
@@ -181,7 +185,7 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             std::vector<uint8_t> payload;
             ImageProjection projection{};
             if (projected && (!recv_all(client, &projection, sizeof(projection)) ||
-                !(quads ? valid_quads(projection) : valid_projection(projection)) ||
+                !(batch ? (valid_projection(projection) || valid_quads(projection) || valid_equirect(projection)) : equirect_version(header.version) ? valid_equirect(projection) : quads ? valid_quads(projection) : valid_projection(projection)) ||
                 (mixed && quads && projection.quad_count() != 1))) {
                 std::fprintf(stderr, "AXRB Image TCP: invalid projection metadata\n");
                 close_socket(client);
@@ -193,7 +197,8 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
                 break;
             }
 
-            bool consumed = callback && callback(header, projection, std::move(payload));
+            const bool validBatch = !batch || valid_gpu_batch(header, payload.data(), payload.size());
+            bool consumed = validBatch && callback && callback(header, projection, std::move(payload));
             if (gpu) {
                 uint64_t acknowledgment = consumed ? header.sequence : UINT64_MAX;
                 const char* bytes = reinterpret_cast<const char*>(&acknowledgment);
@@ -218,6 +223,7 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             }
             ++receivedFrames;
         }
+        if (maxFrames && receivedFrames >= maxFrames) close_socket(client);
     }
 
     close_socket(server);

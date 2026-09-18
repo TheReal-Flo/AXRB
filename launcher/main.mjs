@@ -6,16 +6,27 @@ import { randomUUID, createHash } from 'node:crypto';
 import { MetaAuth, QuestStore, appId } from './core/meta.mjs';
 import { downloadFile, safeName, checkSpace } from './core/download.mjs';
 import { State } from './core/state.mjs';
-import { Runtime, run } from './core/runtime.mjs';
+import { Runtime, openWindowsFeatures, run } from './core/runtime.mjs';
+import { Setup } from './core/setup.mjs';
 import { loadLibraryArtwork } from './core/artwork.mjs';
+import { Quest } from './core/quest.mjs';
+import { importGameZip } from './core/game-files.mjs';
 
-const directory = path.dirname(fileURLToPath(import.meta.url)), root = path.dirname(directory);
+// Keep the packaged app in Electron GUI mode even when launched from a shell
+// that uses ELECTRON_RUN_AS_NODE for other tooling.
+delete process.env.ELECTRON_RUN_AS_NODE;
+const directory = path.dirname(fileURLToPath(import.meta.url)), root = app.isPackaged ? path.join(process.resourcesPath, 'runtime') : path.dirname(directory);
+if (app.isPackaged) process.env.PATH = path.join(root, 'tools/python') + path.delimiter + process.env.PATH;
 const smoke = process.argv.includes('--smoke-test');
-if (smoke) app.setPath('userData', path.join(root, 'build-launcher-smoke'));
+const debug = process.argv.includes('--axrb-debug') || process.argv.includes('--debug') || process.env.AXRB_DEBUG === '1';
+const profile = app.commandLine.getSwitchValue('user-data-dir');
+if (profile) app.setPath('userData', path.resolve(profile));
+else if (smoke) app.setPath('userData', path.join(root, 'out/launcher/smoke'));
 else app.setPath('userData', path.join(app.getPath('appData'), 'AXRB'));
 if (!app.requestSingleInstanceLock()) app.quit();
 app.on('second-instance', () => { window?.show(); window?.focus(); });
 let window, authWindow, state, runtime, token = '', account = '', busy = false;
+let setup;
 const controllers = new Map();
 const searchResults = new Map();
 let artworkTask;
@@ -31,7 +42,7 @@ const uiPath = path.join(directory, 'dist/index.html');
 const message = error => String(error?.message || error).replace(/(?:OC|FRL|EA)[A-Za-z0-9_|-]{30,}/g, '[redacted]').replace(/access_token=[^\s&]+/g, 'access_token=[redacted]');
 const exists = async file => { try { await fs.access(file); return true; } catch { return false; } };
 function publicState() {
-  return { ...state.data, signedIn: Boolean(token), account, running: runtime.game, busy,
+  return { ...state.data, setup: setup?.status, signedIn: Boolean(token), account, running: runtime.game, busy,
     // Credentials and signed CDN URLs never reach the renderer or library file.
     games: state.data.games.map(g => ({ ...g, files: g.files?.map(f => ({ name: f.name, path: f.path, kind: f.kind, size: f.size })) })) };
 }
@@ -42,14 +53,17 @@ function store() { if (!token) throw new Error('Sign in to Meta first.'); return
 function handler(name, callback) {
   ipcMain.handle(`axrb:${name}`, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('Untrusted launcher request.');
-    try { return { ok: true, value: await callback(...args) }; } catch (error) { return { ok: false, error: message(error) }; }
+    try {
+      if (setup && setup.status.phase !== 'ready' && ['play', 'install', 'uninstall', 'import', 'patch', 'settings', 'questDevices', 'questGames', 'questImport', 'importZip'].includes(name)) throw new Error('Complete runtime setup first.');
+      return { ok: true, value: await callback(...args) }; } catch (error) { return { ok: false, error: message(error) }; }
   });
 }
 async function exclusive(callback) { if (busy) throw new Error('Wait for the current install or patch to finish.'); busy = true; changed(); try { return await callback(); } finally { busy = false; changed(); } }
 
 async function syncInstalled() {
+  if (busy) return false;
   const installed = await runtime.installed();
-  if (!installed) return false;
+  if (!installed || busy) return false;
   state.data.games = state.data.games.filter(g => !(g.source === 'installed' && g.package?.startsWith('com.axrb.')));
   for (const game of state.data.games) game.installed = Boolean(game.package && installed.has(game.package));
   for (const pkg of installed) {
@@ -101,6 +115,7 @@ async function login() {
 }
 
 async function downloadGame(id, binaryId, dlcId) {
+  if (busy) throw new Error('Wait for the current import or installation to finish.');
   const game = getGame(id);
   if (state.data.jobs.some(j => j.gameId === id && ['queued', 'downloading', 'installing', 'patching'].includes(j.status))) throw new Error('This game already has an active task.');
   const api = store();
@@ -151,19 +166,73 @@ async function downloadGame(id, binaryId, dlcId) {
   return job.id;
 }
 
+async function importTransfer(kind, input) {
+  if (busy || controllers.size) throw new Error('Wait for current transfers and installations to finish.');
+  if (kind === 'zip' && runtime.child) throw new Error('Close the running game before installing.');
+  busy = true;
+  const job = { id: randomUUID(), kind, gameId: `local:${input.package || 'zip'}`, name: input.package || path.basename(input.file),
+    status: kind === 'apk' ? 'importing' : 'downloading', stage: kind === 'apk' ? 'Reading APK' : 'Preparing import', completed: 0, total: 0 };
+  const controller = new AbortController(); controllers.set(job.id, controller);
+  state.data.jobs.unshift(job);
+  try { await persist(); } catch (error) { busy = false; controllers.delete(job.id); throw error; }
+  void (async () => {
+    let last = 0;
+    const notify = () => { if (Date.now() - last > 150) { last = Date.now(); changed(); } };
+    const options = { signal: controller.signal,
+      update: stage => { job.stage = stage; notify(); },
+      progress: (completed, total) => { job.completed = completed; job.total = total; job.progressUnit = kind === 'zip' ? 'files' : 'bytes'; notify(); } };
+    try {
+      const inspect = (file, flags) => runtime.inspect(file, flags);
+      const imported = kind === 'quest'
+        ? await new Quest(runtime.settings).pullGame(input.serial, input.package, state.data.settings.downloadDir, inspect, options)
+        : kind === 'apk' ? { ...await inspect(input.file), downloaded: true }
+        : await importGameZip(input.file, state.data.settings.downloadDir, inspect, options);
+      controller.signal.throwIfAborted();
+      const existing = state.data.games.find(g => g.package === imported.package);
+      const game = state.put({ ...imported, id: existing?.id || imported.id, source: existing?.source || imported.source,
+        importedFrom: kind, installed: existing?.installed || false });
+      job.gameId = game.id; job.name = game.name; job.completed = job.total;
+      await persist();
+      if (kind === 'zip') {
+        job.status = 'installing'; job.stage = 'Starting Android'; changed();
+        // A cancelled extraction never reaches installation. After this point the
+        // job remains an install, so its APK/asset transaction is not interrupted.
+        await runtime.install(game, stage => { job.stage = stage; notify(); });
+        game.installed = true;
+      }
+      job.status = 'complete'; job.stage = kind === 'zip' ? 'Installed' : 'Ready to install';
+    } catch (error) { job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = message(error); }
+    finally { controllers.delete(job.id); busy = false; await persist(); }
+  })().catch(error => { console.error(message(error)); });
+  return job.id;
+}
+
 async function bootstrap() {
 state = new State(app.getPath('userData')); await state.load();
 state.data.settings = { sdk: path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk'), avd: 'axrb-games-api34', port: 5580,
-  memoryMB: 8192, downloadDir: path.join(app.getPath('downloads'), 'AXRB'), ovrportCli: '',
-  guestClock: await exists(path.join(root, 'build-whpx-clock/Release/axrb_clock_launcher.exe')) ? 'TscCorrected' : 'Default', ...state.data.settings };
+  memoryMB: 8192, cpuCores: 4, downloadDir: path.join(app.getPath('downloads'), 'AXRB'), ovrportCli: '',
+  guestClock: await exists(path.join(root, 'out/clock/Release/axrb_clock_launcher.exe')) ? 'TscCorrected' : 'Default', ...state.data.settings };
 runtime = new Runtime(root, state.data.settings);
+if (!smoke && (app.isPackaged || state.data.settings.managedDirectory || !await exists(path.join(state.data.settings.sdk, 'emulator/emulator.exe')))) {
+  const managed = state.data.settings.managedDirectory || path.join(process.env.LOCALAPPDATA, 'AXRB Runtime');
+  if (!state.data.settings.managedDirectory) Object.assign(runtime.settings, { sdk: path.join(managed, 'sdk'), avd: 'axrb-managed-api36', port: 5584 });
+  setup = new Setup({ root, directory: managed, runtime,
+    components: JSON.parse(await fs.readFile(path.join(directory, 'core/components.json'), 'utf8')),
+    save: async value => { state.data.settings.managedDirectory = value; await persist(); }, changed, debug });
+  setup.environment();
+}
 try { if (safeStorage.isEncryptionAvailable()) token = safeStorage.decryptString(await fs.readFile(path.join(state.directory, 'meta-session.bin'))); } catch {}
-window = new BrowserWindow({ width: 1320, height: 880, minWidth: 920, minHeight: 640, title: 'AXRB', backgroundColor: '#141414',
+window = new BrowserWindow({ width: 1320, height: 880, minWidth: 920, minHeight: 640, title: 'AXRB', icon: path.join(directory, 'assets/axrb.ico'), backgroundColor: '#141414',
   autoHideMenuBar: true, webPreferences: { preload: path.join(directory, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false } });
 window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 window.webContents.on('will-navigate', event => event.preventDefault());
 window.webContents.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
 handler('state', () => publicState());
+handler('setupCheck', () => setup?.check());
+handler('setupStart', options => setup?.start(options));
+handler('setupCancel', () => setup?.cancel());
+handler('setupFeatures', () => openWindowsFeatures());
+handler('setupLicense', async () => { const error = await shell.openPath(path.join(app.isPackaged ? process.resourcesPath : directory, 'licenses/android-sdk.txt')); if (error) throw new Error(error); });
 handler('login', async () => { await login(); return syncMeta(); });
 handler('logout', async () => { for (const controller of controllers.values()) controller.abort(); token = ''; account = ''; await fs.rm(path.join(state.directory, 'meta-session.bin'), { force: true }); changed(); });
 handler('sync', async () => { const online = await syncInstalled(); const result = token ? await syncMeta() : null; return { online, meta: result }; });
@@ -174,16 +243,25 @@ handler('builds', id => store().builds(appId(id)).then(items => items.map(b => (
 handler('download', (id, binaryId) => downloadGame(appId(id), binaryId));
 handler('dlc', id => store().dlc(appId(id)).then(items => items.map(({ files, ...item }) => ({ ...item, fileCount: files.length, bytes: files.reduce((n, f) => n + f.size, 0) }))));
 handler('downloadDlc', (id, dlcId) => downloadGame(appId(id), null, appId(dlcId)));
-handler('cancel', id => { controllers.get(id)?.abort(); });
+handler('cancel', id => { if (['queued', 'downloading', 'importing'].includes(state.data.jobs.find(j => j.id === id)?.status)) controllers.get(id)?.abort(); });
 handler('retry', id => { const job = state.data.jobs.find(j => j.id === id); if (!job || !['failed', 'interrupted', 'cancelled'].includes(job.status)) throw new Error('This task cannot be retried.'); return downloadGame(job.gameId, job.binaryId, job.dlcId); });
-handler('import', () => exclusive(async () => {
+handler('import', async () => {
+  if (busy) throw new Error('Wait for the current task to finish.');
   const result = await dialog.showOpenDialog(window, { title: 'Import an Android game', filters: [{ name: 'Android APK', extensions: ['apk'] }], properties: ['openFile'] });
   if (result.canceled) return;
-  const game = await runtime.inspect(result.filePaths[0]);
-  const existing = state.data.games.find(g => g.package === game.package);
-  state.put({ ...game, id: existing?.id || game.id, source: existing?.source || game.source, downloaded: true });
-  await persist(); return game.package;
+  return importTransfer('apk', { file: result.filePaths[0] });
+});
+handler('questDevices', () => new Quest(runtime.settings).devices());
+handler('questGames', async serial => (await new Quest(runtime.settings).games(serial)).map(game => {
+  const known = state.data.games.find(g => g.package === game.package);
+  return { ...game, name: known?.name || game.name, downloaded: Boolean(known?.downloaded), image: known?.image || '' };
 }));
+handler('questImport', (serial, packageName) => importTransfer('quest', { serial, package: packageName }));
+handler('importZip', async () => {
+  if (busy) throw new Error('Wait for the current task to finish.');
+  const result = await dialog.showOpenDialog(window, { title: 'Install game ZIP', filters: [{ name: 'Game ZIP', extensions: ['zip'] }], properties: ['openFile'] });
+  if (!result.canceled) return importTransfer('zip', { file: result.filePaths[0] });
+});
 handler('importAssets', id => exclusive(async () => {
   const game = getGame(id);
   const result = await dialog.showOpenDialog(window, { title: 'Add expansion files / DLC assets', properties: ['openFile', 'multiSelections'] });
@@ -204,6 +282,23 @@ handler('install', id => exclusive(async () => {
   try { await runtime.install(game, stage => { job.stage = stage; changed(); }); game.installed = true; job.status = 'complete'; job.stage = 'Installed'; }
   catch (error) { job.status = 'failed'; job.error = message(error); throw error; }
   finally { await persist(); }
+}));
+handler('uninstall', id => exclusive(async () => {
+  const game = getGame(id);
+  if (!game.installed) throw new Error('Game is not installed.');
+  if (runtime.child || controllers.size) throw new Error('Close the running game and finish transfers before uninstalling.');
+  const answer = await dialog.showMessageBox(window, { type: 'warning', title: 'Uninstall game',
+    message: `Uninstall ${game.name}?`, detail: 'Removes the game and its saved data from AXRB’s Android emulator. Downloaded APKs and assets stay on your PC.',
+    buttons: ['Cancel', 'Uninstall'], defaultId: 0, cancelId: 0, noLink: true });
+  if (answer.response !== 1) return false;
+  const job = { id: randomUUID(), kind: 'uninstall', gameId: id, name: game.name, status: 'uninstalling', stage: 'Preparing uninstall' };
+  state.data.jobs.unshift(job); await persist();
+  try {
+    await runtime.uninstall(game, stage => { job.stage = stage; changed(); });
+    game.installed = false; job.status = 'complete'; job.stage = 'Uninstalled';
+  } catch (error) { job.status = 'failed'; job.error = message(error); }
+  finally { await persist(); }
+  return job.status === 'complete';
 }));
 handler('patch', id => exclusive(async () => {
   const game = getGame(id), cli = state.data.settings.ovrportCli;
@@ -228,14 +323,21 @@ handler('play', async id => { const game = getGame(id); if (busy) throw new Erro
   });
   game.lastPlayed = new Date().toISOString(); await persist(); });
 handler('stop', () => runtime.stop());
+handler('fpsHud', async enabled => {
+  await runtime.setFpsHud(enabled);
+  state.data.settings.fpsHud = enabled;
+  await persist();
+});
 handler('settings', async values => {
-  const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'ovrportCli'];
+  const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'cpuCores', 'downloadDir', 'ovrportCli'];
   if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
   if (busy || controllers.size || runtime.child) throw new Error('Finish current tasks before changing runtime settings.');
   const settings = { ...state.data.settings };
   for (const key of allowed) if (values[key] !== undefined) settings[key] = values[key];
+  if (settings.managedDirectory && (settings.sdk !== state.data.settings.sdk || settings.avd !== state.data.settings.avd)) throw new Error('Managed Android paths cannot be changed here.');
   if (!/^[A-Za-z0-9_-]+$/.test(settings.avd) || !Number.isInteger(settings.port) || settings.port < 5554 || settings.port > 5682 || settings.port % 2 ||
     !Number.isInteger(settings.memoryMB) || settings.memoryMB < 2048 || settings.memoryMB > 16384) throw new Error('Check the Android AVD, even-numbered port, and memory settings.');
+  if (!Number.isInteger(settings.cpuCores) || settings.cpuCores < 2 || settings.cpuCores > 6) throw new Error('Choose between 2 and 6 vCPUs.');
   for (const key of ['sdk', 'downloadDir']) if (typeof settings[key] !== 'string' || !path.isAbsolute(settings[key])) throw new Error('Select absolute Windows paths.');
   state.data.settings = settings; runtime.settings = settings; await persist();
 });
@@ -248,11 +350,14 @@ if (smoke) window.webContents.on('console-message', details => { if (details.lev
 await window.loadFile(uiPath);
 window.show();
 window.focus();
+if (setup) await setup.check();
 if (smoke) {
   const { uiSmoke } = await import('./tests/ui-smoke.mjs');
-  await uiSmoke(window, path.join(root, 'build-launcher-smoke'), publicState, uiErrors);
+  await uiSmoke(window, path.join(root, 'out/launcher/smoke'), publicState, uiErrors);
+  const { libraryActionsSmoke } = await import('./tests/library-actions-smoke.mjs');
+  await libraryActionsSmoke(window, { state, runtime, dialog, persist, publicState });
   app.quit();
-} else { syncInstalled().catch(() => {}); refreshArtwork().catch(() => {}); }
-app.on('window-all-closed', () => { for (const controller of controllers.values()) controller.abort(); app.quit(); });
+} else { if (!setup || setup.status.phase === 'ready') syncInstalled().catch(() => {}); refreshArtwork().catch(() => {}); }
+app.on('window-all-closed', () => { for (const controller of controllers.values()) controller.abort(); setup?.cancel(); if (setup?.task) setup.task.finally(() => app.quit()); else app.quit(); });
 }
 app.whenReady().then(bootstrap).catch(error => { console.error(message(error)); if (!smoke) dialog.showErrorBox('AXRB could not start', message(error)); app.exit(1); });

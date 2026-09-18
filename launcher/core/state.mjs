@@ -6,7 +6,7 @@ export class State {
     await fs.mkdir(this.directory, { recursive: true });
     try { this.data = { ...this.data, ...JSON.parse(await fs.readFile(path.join(this.directory, 'library.json'), 'utf8')) }; }
     catch (error) { if (error.code !== 'ENOENT') throw new Error('Launcher library could not be read. The original file has been preserved.'); }
-    this.data.jobs = this.data.jobs.map(j => ['queued', 'downloading', 'installing', 'patching'].includes(j.status) ? { ...j, status: 'interrupted', error: 'Interrupted when the launcher closed. Retry to continue.' } : j);
+    this.data.jobs = this.data.jobs.map(j => ['queued', 'downloading', 'installing', 'patching', 'importing', 'uninstalling'].includes(j.status) ? { ...j, status: 'interrupted', error: 'Interrupted when the launcher closed. Retry to continue.' } : j);
   }
   save() {
     const snapshot = JSON.stringify(this.data, null, 2);

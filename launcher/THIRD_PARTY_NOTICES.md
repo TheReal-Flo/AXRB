@@ -46,3 +46,17 @@ Quest delivery's application-token exchange was verified against the public
 [QuestAppVersionSwitcher LoginClient API flow](https://github.com/ComputerElite/QuestAppVersionSwitcher/blob/master/QuestAppVersionSwitcher/OculusGraphQLApiLib/GraphQL/LoginClient.cs).
 Only endpoint and application-ID protocol facts are used; its implementation is
 not bundled. Download tokens remain in the main process and are not persisted.
+
+
+## Packaged runtime dependencies
+
+The embedded Python 3.14.3 distribution includes its PSF license as
+`runtime/tools/python/LICENSE.txt`. The clock adapter includes MinHook's BSD
+license in `runtime/licenses/MinHook.txt`. Khronos OpenXR and Vulkan headers are
+used under Apache-2.0 (Copyright 2015?2026 The Khronos Group Inc.); see
+`licenses/Apache-2.0.txt`. LLVM/libc++ notices for the NDK runtime are included in
+`licenses/LLVM-NDK.txt`.
+
+Google's Android emulator, platform tools, build tools and Google APIs system image
+are downloaded directly from Google after acceptance of the Android SDK license;
+they are not embedded in the installer. Their archives retain their notices.

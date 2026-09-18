@@ -31,7 +31,12 @@ export async function uiSmoke(window, directory, snapshot, errors) {
   async function capture(name) { await tick(); await fs.writeFile(path.join(directory, `${name}.png`), (await wc.capturePage()).toPNG()); }
 
   await check(`Boolean(document.querySelector('#library-search'))`, 'Library did not load');
+  await check(`Array.from(document.querySelectorAll('button')).some(b => b.textContent === 'Install ZIP')`, 'ZIP install action missing');
   if (await js(`Boolean(document.querySelector('h1, footer'))`)) throw new Error('Unexpected decorative heading/footer');
+  await click('[data-nav="quest"]');
+  await check(`Boolean(document.querySelector('[data-quest]'))`, 'Quest view did not render');
+  await check(`Boolean(document.querySelector('[aria-label="Quest device"]')) && Boolean(document.querySelector('[aria-label="Refresh Quest"]'))`, 'Quest controls missing');
+  await capture('quest');
   await click('[data-nav="settings"]');
   await check(`Boolean(document.querySelector('#settings-form'))`, 'Settings did not render');
   await input('#downloadDir', 'C:\\AXRB UI draft');
@@ -40,6 +45,11 @@ export async function uiSmoke(window, directory, snapshot, errors) {
   await check(`document.querySelector('#downloadDir').value === 'C:\\\\AXRB UI draft'`, 'State updates erased settings draft');
   await click('[data-runtime-settings] summary');
   await check(`document.querySelector('[data-runtime-settings]').open`, 'Runtime settings did not expand');
+  const originalHud = await js(`document.querySelector('#fps-hud').checked`);
+  await click('#fps-hud');
+  await check(`document.querySelector('#fps-hud').checked !== ${originalHud}`, 'FPS HUD toggle did not update');
+  await click('#fps-hud');
+  await check(`document.querySelector('#fps-hud').checked === ${originalHud}`, 'FPS HUD toggle did not restore');
   await capture('settings');
   await click('[data-nav="downloads"]');
   await check(`Boolean(document.querySelector('.jobs'))`, 'Downloads did not render');
@@ -90,11 +100,33 @@ export async function uiSmoke(window, directory, snapshot, errors) {
   await capture('downloads');
   window.setSize(920, 640);
   await tick();
+  await click('[data-nav="library"]');
+  await check(`document.documentElement.scrollWidth <= window.innerWidth`, 'Library import controls overflow minimum window width');
+  await capture('library-small');
   await click('[data-nav="store"]');
   await check(`document.documentElement.scrollWidth <= window.innerWidth`, 'UI overflows minimum window width');
   await capture('store-small');
   wc.send('axrb:launch-error', 'Game launch test failed');
   await check(`document.querySelector('[role="alert"]')?.textContent.includes('Game launch test failed')`, 'Launch failure was not shown');
+  const setup = { phase: 'hypervisor', directory: 'C:\\AXRB Runtime', active: false };
+  wc.send('axrb:changed', { ...snapshot(), setup });
+  await check(`document.body.textContent.includes('Enable Windows Hypervisor Platform')`, 'Virtualization instructions missing');
+  await capture('setup-hypervisor');
+  setup.phase = 'install';
+  wc.send('axrb:changed', { ...snapshot(), setup });
+  await check(`Boolean(document.querySelector('#runtime-folder'))`, 'Setup folder missing');
+  await check(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Download and set up')?.disabled`, 'Setup did not require license acceptance');
+  await click('input[type="checkbox"]');
+  await check(`!Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Download and set up')?.disabled`, 'License acceptance did not enable setup');
+  await capture('setup-install');
+  Object.assign(setup, { phase: 'download', active: true, component: 'Android 16 with ARM64 translation', completed: 512, total: 1024 });
+  wc.send('axrb:changed', { ...snapshot(), setup });
+  await check(`document.querySelector('progress')?.value === 512 && document.body.textContent.includes('50%')`, 'Setup progress missing');
+  await capture('setup-download');
+  Object.assign(setup, { phase: 'error', active: false, error: 'Download interrupted' });
+  wc.send('axrb:changed', { ...snapshot(), setup });
+  await check(`document.querySelector('[role="alert"]')?.textContent.includes('Download interrupted') && document.body.textContent.includes('Retry setup')`, 'Setup retry missing');
+  await check(`document.documentElement.scrollWidth <= window.innerWidth`, 'Setup overflows minimum window width');
   if (errors.length) throw new Error(`Renderer errors: ${errors.join('; ')}`);
   console.log(`AXRB React smoke passed: navigation, settings draft, ${count} live Quest results, library add/filter, dialog/menu keyboard focus, download progress, 920px layout`);
 }

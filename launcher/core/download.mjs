@@ -51,8 +51,11 @@ export async function downloadFile({ url, destination, size = 0, signal, progres
     if (!range || Number(range[1]) !== offset || (size && Number(range[3]) !== size)) { await response.body?.cancel(); throw new Error('Server returned an inconsistent download range.'); }
   } else offset = 0;
   const length = Number(response.headers.get('content-length') || 0);
+  // CDN content-length is not reliable here: Meta may serve a compressed or
+  // transformed representation, and proxies can omit/update it. The streamed
+  // byte count below is authoritative and is checked against the requested
+  // metadata before the completed file is renamed.
   const total = size || (length ? length + offset : 0);
-  if (size && length && length + offset !== size) { await response.body?.cancel(); throw new Error('Download size does not match Meta metadata.'); }
   await fs.writeFile(sidecar, JSON.stringify({ size, etag: response.headers.get('etag') || '' }));
   const file = await fs.open(part, offset ? 'a' : 'w');
   let received = offset;
@@ -77,10 +80,9 @@ export async function downloadFile({ url, destination, size = 0, signal, progres
   return { bytes: received, sha256: hash.digest('hex') };
 }
 
-export async function checkSpace(directory, bytes) {
+export async function checkSpace(directory, bytes, { reserve = 5 * 1024 ** 3 } = {}) {
   await fs.mkdir(directory, { recursive: true });
   const space = await fs.statfs(directory);
   const available = Number(space.bavail) * Number(space.bsize);
-  const reserve = 5 * 1024 ** 3; // Keep Android's cold-boot minimum available.
   if (available < bytes + reserve) throw new Error(`Not enough disk space. This download needs ${(bytes / 1024 ** 3).toFixed(1)} GB plus 5 GB free for Android. Choose another download folder in Settings.`);
 }

@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<manifest>
-  <remote name="axrb-digitalis" fetch="https://github.com/DigitalisX64/" />
-  <extend-project name="digitalis" remote="axrb-digitalis" revision="a6edb72029cd25cb616bdee1a12b2d64e3a6a3ae" />
-  <extend-project name="platform_frameworks_libs_binary_translation" remote="axrb-digitalis" revision="9e7f4407e0e32a582fe2a56f87492443ca55d6fa" />
-  <extend-project name="device_generic_goldfish" remote="axrb-digitalis" revision="bbc2f1e4237016e744be8de59b7b6b310f2cc242" />
-  <extend-project name="sample_hello_digitalis" remote="axrb-digitalis" revision="ce9aa11646b0e16a7901388ae6ac4cc42e0b5c90" />
-</manifest>

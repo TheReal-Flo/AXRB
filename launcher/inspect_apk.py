@@ -2,7 +2,7 @@
 import argparse, base64, json, re, subprocess, zipfile
 from pathlib import Path
 
-def inspect(apk, sdk):
+def inspect(apk, sdk, allow_split=False):
     versions = [p for p in (sdk / 'build-tools').glob('*/aapt2.exe')]
     if not versions:
         raise RuntimeError('Android SDK build-tools (aapt2) are required')
@@ -12,11 +12,14 @@ def inspect(apk, sdk):
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
     package = re.search(r"^package: name='([^']+)'", output, re.M)
     activity = re.search(r"^launchable-activity: name='([^']+)'", output, re.M)
-    if not package or not activity:
+    split = re.search(r"^package: .*\bsplit='([^']+)'", output, re.M)
+    if not package or (not activity and not (allow_split and split)):
         raise RuntimeError('APK does not contain a launchable Android application')
     label = re.search(r"^application-label:'(.*)'$", output, re.M)
     version = re.search(r"versionName='([^']*)'", output)
-    result = {'package': package[1], 'activity': package[1] + '/' + activity[1],
+    code = re.search(r"versionCode='([^']*)'", output)
+    result = {'package': package[1], 'activity': package[1] + '/' + activity[1] if activity else '',
+        'split': split[1] if split else '', 'versionCode': code[1] if code else '',
         'name': label[1] if label else package[1], 'version': version[1] if version else '', 'image': ''}
     with zipfile.ZipFile(apk) as archive:
         names = archive.namelist()
@@ -33,6 +36,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--apk', type=Path, required=True)
     p.add_argument('--sdk', type=Path, required=True)
+    p.add_argument('--allow-split', action='store_true')
     a = p.parse_args()
-    try: print(json.dumps(inspect(a.apk, a.sdk)))
+    try: print(json.dumps(inspect(a.apk, a.sdk, a.allow_split)))
     except Exception as error: raise SystemExit(str(error))

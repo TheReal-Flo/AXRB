@@ -12,17 +12,24 @@ constexpr uint32_t kTransportEyeDimension = 1024;
 
 constexpr uint32_t kImageFrameMagic = 0x49585241; // AXRI, little-endian.
 constexpr uint16_t kImageFrameVersion = 1;
+constexpr uint16_t kEmptyImageFrameVersion = 12;
 constexpr uint16_t kProjectionImageFrameVersion = 2;
 constexpr uint16_t kQuadImageFrameVersion = 4;
 constexpr uint16_t kQuadGpuFrameVersion = 5;
-constexpr uint32_t kMaxCompositionLayers = 16;
+// Count/index fields in legacy mixed packets are 16 bits; not a storage allocation size.
+constexpr uint32_t kMaxWireCompositionLayers = 0xffff;
 constexpr uint16_t kMixedProjectionGpuFrameVersion = 6;
 constexpr uint16_t kMixedQuadGpuFrameVersion = 7;
-inline bool mixed_gpu_version(uint16_t version) { return version == 6 || version == 7; }
+constexpr uint16_t kEquirectGpuFrameVersion = 8;
+constexpr uint16_t kMixedEquirectGpuFrameVersion = 9;
+constexpr uint16_t kEquirectImageFrameVersion = 10;
+inline bool equirect_gpu_version(uint16_t v) { return v == 8 || v == 9; }
+inline bool equirect_version(uint16_t v) { return equirect_gpu_version(v) || v == kEquirectImageFrameVersion; }
+inline bool mixed_gpu_version(uint16_t version) { return version == 6 || version == 7 || version == 9; }
 inline bool valid_mixed_part(uint16_t version, uint32_t part) {
     const uint32_t count = part >> 16, index = part & 0xffff;
-    return count >= 2 && count <= kMaxCompositionLayers && index < count &&
-        (version == kMixedQuadGpuFrameVersion || (index == 0 && version == kMixedProjectionGpuFrameVersion));
+    return count >= 2 && count <= kMaxWireCompositionLayers && index < count &&
+        (version == kMixedQuadGpuFrameVersion || version == kMixedEquirectGpuFrameVersion || (index == 0 && version == kMixedProjectionGpuFrameVersion));
 }
 constexpr uint16_t kImageFrameTypeRgba8 = 2;
 constexpr uint32_t kImageFrameFormatRgba8 = 1;
@@ -49,6 +56,11 @@ struct ImageProjectionView {
     Pose pose; // The render camera in the host's LOCAL coordinate space, meters.
     float angle_left = 0, angle_right = 0, angle_up = 0, angle_down = 0;
 };
+struct ImageEquirect {
+    Pose pose;
+    float radius, horizontal_angle, upper_angle, lower_angle;
+    uint32_t eye_visibility, layer_flags;
+};
 struct ImageQuad {
     Pose pose;
     float width = 0, height = 0;
@@ -56,6 +68,7 @@ struct ImageQuad {
 };
 // Versions 4/5 carry one or two ordered quad layers in the same 96-byte
 // metadata envelope. The high bit distinguishes them from stereo cameras.
+constexpr uint32_t kEquirectComposition = 0x40000001u;
 constexpr uint32_t kQuadCompositionBit = 0x80000000u;
 struct ImageProjection {
     uint32_t view_count = 0; // Zero for legacy frames; v2 requires two eyes.
@@ -63,7 +76,9 @@ struct ImageProjection {
     union {
         ImageProjectionView views[2]{};
         ImageQuad quads[2];
+        ImageEquirect equirect;
     };
+    bool is_equirect() const { return view_count == kEquirectComposition; }
     uint32_t quad_count() const { return (view_count & kQuadCompositionBit) ? (view_count & ~kQuadCompositionBit) : 0; }
 };
 static_assert(sizeof(ImageQuad) == 44);
@@ -85,6 +100,19 @@ inline bool valid_projection(const ImageProjection& projection) {
             view.angle_down <= -1.5707963f || view.angle_up >= 1.5707963f) { return false; }
     }
     return true;
+}
+
+inline bool valid_equirect(const ImageProjection& c) {
+    if (!c.is_equirect() || c.layer_flags) return false;
+    const auto& e = c.equirect;
+    const auto& p = e.pose;
+    for (float f : {p.x,p.y,p.z,p.qx,p.qy,p.qz,p.qw,e.horizontal_angle,e.upper_angle,e.lower_angle})
+        if (!std::isfinite(f)) return false;
+    const float norm = p.qx*p.qx+p.qy*p.qy+p.qz*p.qz+p.qw*p.qw;
+    return std::fabs(norm-1.f) <= .01f && e.radius >= 0 &&
+        e.horizontal_angle >= 0 && e.horizontal_angle <= 6.2831854f &&
+        e.lower_angle >= -1.5707964f && e.upper_angle <= 1.5707964f && e.lower_angle <= e.upper_angle &&
+        e.eye_visibility <= 2 && !(e.layer_flags & ~7u);
 }
 
 inline bool valid_quads(const ImageProjection& composition) {

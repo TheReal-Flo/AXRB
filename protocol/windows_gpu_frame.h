@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 namespace axrb::protocol {
+constexpr uint32_t kGpuBatchSlotTag = 0x42544348;
 constexpr uint64_t kGpuMarkerMagic = 0x4158524247505531ULL;
 // A standard vkCmdUpdateBuffer packet marks AXRB's following two eye blits.
 // The host layer writes status=1 only after recording both shared-image copies.
@@ -14,6 +15,7 @@ struct WindowsGpuMarker {
     uint32_t reserved[5]{};
 };
 static_assert(sizeof(WindowsGpuMarker) == 64);
+// formats[1] == 0 means both eyes use the single image named eye 0.
 struct WindowsGpuFrame { uint64_t session = 0; uint32_t formats[2]{}; };
 static_assert(sizeof(WindowsGpuFrame) == 16);
 constexpr uint16_t kWindowsGpuFrameVersion = 3;

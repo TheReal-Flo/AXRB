@@ -17,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', default='emulator-5580')
     parser.add_argument('--seconds', type=int, default=35)
-    parser.add_argument('--host-log', type=Path, default=Path('build-windows-game/host.err'))
+    parser.add_argument('--host-log', type=Path, default=Path('out/logs/game/host.err'))
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.seconds < 20 or args.output.exists():

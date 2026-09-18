@@ -1,8 +1,5 @@
 # Deferred performance work
 
-Current source-level analysis and prioritized experiments:
-[Runtime bottlenecks without an architecture change](current_runtime_bottlenecks.md).
-
 Resolution follow-up: [runtime-selected resolution](runtime_resolution.md) is now
 active. Pinball uses SteamVR's 2444x2580 recommendation instead of 1024x1024.
 Earlier FPS figures at 1024-square are not directly comparable to this workload.
@@ -13,7 +10,7 @@ Recorded 2026-09-16 before switching to controller/hand issues.
 - [ ] Choose further optimizations from those measurements; do not assume a different emulator or translator will improve performance.
 - [ ] Repeat a controlled benchmark with the same scene, headset active, resolution, and warm-up; record frame-time distribution and stalls.
 
-Current baseline: native Windows Nvidia rendering, 1024x1024 per eye, shared GPU textures, reception on a separate D3D11 context. Observed 23-28 game fps, about 1.5-1.8 ms transfer/ACK and 2-2.4 ms Android end-frame. UnityMain used 90-94% of one guest core; a GPU utilization sample was 8%. These point to a CPU main-thread limit but do not identify translation versus game costs. See [GPU transfer notes](windows_gpu_texture_transfer.md) and local `build-profile/` logs.
+Current baseline: native Windows Nvidia rendering, 1024x1024 per eye, shared GPU textures, reception on a separate D3D11 context. Observed 23-28 game fps, about 1.5-1.8 ms transfer/ACK and 2-2.4 ms Android end-frame. UnityMain used 90-94% of one guest core; a GPU utilization sample was 8%. These point to a CPU main-thread limit but do not identify translation versus game costs. See [GPU transfer notes](windows_gpu_texture_transfer.md) and local `out/previous-builds/build-profile/` logs.
 
 ## Pinball follow-up
 
@@ -63,12 +60,8 @@ settings have not been reduced.
   renderers and table changes. Pinball startup verifies a 7925 MiB actual pool
   with normal streaming; no game-specific selection rules are used.
 
-## ARM64 translation research
+## ARM64 translation
 
-See [options and experiment order](arm64_translation_options.md). The installed
-Google 0.2.3 translator is already running in two-gear mode; no translator or
-settings were changed during this research. Prioritize fresh critical-path
-profiling and graphics-command transport, then compare a matched newer Google
-image and the open-source Digitalis candidate. Dynarmic needs substantial
-Android integration. No faster-than-Quest result has been demonstrated.
-
+- [ ] Re-profile game CPU and graphics-command transport on Android 16 before
+  selecting further translator work. Keep the original-instruction atomic and
+  math probes as correctness gates. Faster-than-Quest performance is unverified.

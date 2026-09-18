@@ -1,224 +1,85 @@
 # AXRB
 
-Android Extended Reality Bridge.
+AXRB runs Android XR applications on Windows and presents them through a
+desktop OpenXR runtime such as SteamVR. Android runs in a hardware-accelerated
+x86_64 emulator. ARM64 applications are translated inside Android, while GLES
+and Vulkan rendering use the host GPU. Frames are transferred to the Windows
+compositor with shared GPU textures.
 
-AXRB is an experimental bridge for running Android OpenXR applications inside a Linux Android container and forwarding their OpenXR runtime calls, tracking, and frame output to a PC OpenXR runtime such as SteamVR or Monado.
+## What the project provides
 
-The current prototype proves loader/runtime integration and stereo frame transport. The native Windows branch renders GLES and Vulkan samples on Nvidia hardware, including translated ARM64 applications. It is not production-ready.
+- A Windows launcher for the AXRB runtime and installed Android games.
+- Meta Quest library and storefront integration for owned Quest applications.
+- Downloads for Quest APKs, split APKs, OBB files, expansion assets and eligible DLC.
+- Import of local APKs, patched APKs and ZIP packages containing game files.
+- Android 16 runtime support with ARM64 translation.
+- OpenXR presentation to SteamVR, including stereo layers, dynamic layer
+  storage, controller input, tracking, audio routing and application identity.
+- GPU-backed Vulkan and OpenXR frame transport instead of software rendering.
+- Shared runtime policies for Unreal texture memory and other compatibility
+  behavior, without game-specific patches in the launcher.
+- Optional FPS HUD, preview window and save-aware game shutdown.
 
-## Native Windows / Nvidia branch
+## Runtime model
 
-The Windows desktop launcher is in [launcher/](launcher/README.md). Run
-`powershell -ExecutionPolicy Bypass -File tools/run_launcher.ps1` for a local game
-library, Meta Quest storefront, APK/content downloads, and AXRB install/play controls.
+The Android guest provides the application environment and ARM64 translation.
+The Windows host supplies the physical GPU, OpenXR session and headset output.
+The runtime keeps Android and Windows responsibilities separate:
 
-An experimental Android Emulator / Gfxstream path uses native Windows host GPU
-rendering, with no WSL. PowerShell build, launch and GPU-verification scripts
-are described in [Windows Nvidia setup](docs/windows_nvidia_emulator.md).
-The ARM64-only GLES sample also runs through the emulator's bundled ARM64
-translator with Nvidia rendering and stereo frame delivery; see
-[ARM64 build and verification](docs/windows_nvidia_emulator.md#arm64-translation).
-GLES and Vulkan color swapchains work with both x86_64 and translated ARM64
-samples. See [Vulkan setup and limits](docs/windows_nvidia_emulator.md#vulkan-rendering).
-Frame transport still uses CPU readback; arbitrary game compatibility remains
-unfinished.
+1. The launcher selects or installs a game and its content.
+2. The Android runtime starts the package in the managed emulator.
+3. AXRB translates OpenXR calls and transfers rendered layers to Windows.
+4. The host bridge submits the layers to the active OpenXR runtime.
 
-## Goal
+This design supports NVIDIA and AMD GPUs when their Windows drivers expose the
+required hardware graphics and OpenXR capabilities. Performance and game
+compatibility still depend on the emulator, ARM translator, Android version,
+GPU driver, OpenXR runtime and the application itself.
 
-```text
-Android OpenXR APK
-  -> Android OpenXR loader
-  -> AXRB Android OpenXR runtime APK
-  -> AXRB bridge protocol
-  -> AXRB host bridge
-  -> PC OpenXR runtime
-  -> headset
-```
+## Launcher
 
-Primary development target:
+The launcher keeps the game library, downloads and runtime state together:
 
-- Linux host
-- Waydroid or custom LXC Android container
-- Monado or SteamVR as the host OpenXR runtime
-- Vulkan external memory and dma-buf for the real frame path
+- **Library:** installed, imported and downloaded games in one place.
+- **Store:** Quest catalog search and owned-library synchronization.
+- **Downloads:** resumable transfers with URL validation, size checks and
+  SHA-256 verification.
+- **Imports:** APK, split APK, OBB, asset and ZIP imports without modifying the
+  original files.
+- **Installation:** package installation and Android expansion-file placement.
+- **Runtime:** emulator storage, memory, vCPU and OpenXR-related settings.
+- **Play:** game launch, SteamVR app identity, preview window and clean stop.
 
-Current Windows branch test environment:
+Meta account credentials remain in Meta’s sign-in window. The launcher stores
+the resulting session with Windows credential protection and does not expose it
+to the renderer or game processes.
 
-- Windows host running SteamVR
-- Native Android Emulator with WHPX and Gfxstream/Nvidia rendering
-- x86_64 and translated ARM64 GLES/Vulkan samples
-- TCP stereo image transport with CPU readback for proof of concept
+## Repository layout
 
-## Current Status
+| Directory | Purpose |
+| --- | --- |
+| `launcher/` | Electron launcher, Quest integration and library state |
+| `runtime/` | Android OpenXR runtime and APK packaging |
+| `host/` | Windows OpenXR host, compositor and GPU transport |
+| `protocol/` | Shared frame, pose and transport structures |
+| `scripts/` | Emulator, launcher, runtime and release tooling |
+| `tests/` | Native and integration coverage |
+| `docs/` | Design notes and compatibility investigations |
+| `out/` | Generated runtime, host and release artifacts |
 
-Implemented:
+## Current boundaries
 
-- Android installable OpenXR runtime package: `com.axrb.openxrruntime`
-- Runtime discovery through Android OpenXR runtime broker provider
-- Minimal OpenXR runtime entry points for `hello_xr`
-- HMD and controller pose forwarding from a host OpenXR runtime
-- Windows host bridge using `XR_KHR_D3D11_enable`
-- SteamVR projection layer submission
-- CPU image readback from Android GLES swapchain images
-- Android local socket image proxy in the runtime APK
-- TCP image receiver on the host bridge
-- 512x512 proof-of-concept frame upload into SteamVR
-- Linux dma-buf frame descriptor and Unix FD-passing transport foundation
-- UDP encoded-video transport foundation for the Windows/WSL fallback path
+AXRB is a compatibility runtime, not a replacement for Quest OS. Some games
+require features that are unavailable or behave differently outside the Quest
+system, including proprietary platform services, hand or body tracking,
+protected media paths and title-specific shaders. The launcher reports failed
+Meta requests and incomplete downloads instead of treating them as successful.
 
-Known limitations:
+The project does not bundle commercial games, ovrport, Meta credentials or
+Quest content. Users must supply games they are entitled to use.
 
-- CPU readback and socket transport are slow.
-- The current image path is for validation, not low-latency VR.
-- The Windows/WSL path is useful for development, but it is not the right target for zero-copy frame transport.
-- WSL/Waydroid currently reports Android Vulkan through SwiftShader/CPU on the tested setup, not hardware Vulkan.
-- The native Windows sample can approach 90 fps delivery, but low-latency zero-copy transport still needs GPU sharing or encoding with explicit synchronization.
+## License and attribution
 
-## Repository Layout
-
-```text
-android-runtime/       Native Android OpenXR runtime implementation
-android-runtime-apk/   Installable Android runtime APK and runtime broker
-host-bridge/           Native host bridge talking to PC OpenXR
-protocol/              Pose/image protocol structures and transports
-container/             Waydroid/WSL helper scripts
-tests/                 Runtime smoke tests and Android loader probes
-```
-
-## Build
-
-Native host/WSL build:
-
-```sh
-cmake -S . -B build-wsl
-cmake --build build-wsl
-ctest --test-dir build-wsl --output-on-failure
-```
-
-Windows host bridge build:
-
-```powershell
-cmake --build build --config Debug
-```
-
-Android runtime APK:
-
-```sh
-bash android-runtime-apk/build_apk.sh
-```
-
-The Android APK build expects an Android SDK/NDK available from the environment used to run the script.
-
-## Running The Prototype
-
-Start the Windows host bridge:
-
-```powershell
-.\build\host-bridge\Debug\axrb-host-bridge.exe --serve-openxr 38490
-```
-
-Install the Android runtime APK:
-
-```sh
-adb install -r build-android-runtime-apk/axrb-openxr-runtime-debug.apk
-```
-
-Forward the prototype ports when using adb/Waydroid:
-
-```sh
-adb reverse tcp:38490 tcp:38490
-adb reverse tcp:38491 tcp:38491
-```
-
-Launch an Android OpenXR app, for example Khronos `hello_xr`:
-
-```sh
-adb shell am start -n org.khronos.openxr.hello_xr.opengles/android.app.NativeActivity
-```
-
-Useful logs:
-
-```sh
-adb logcat -s AXRB.Image AXRB.ImageProxy AXRB.PoseBroker OpenXR-Loader
-```
-
-Host logs are written to stderr by `axrb-host-bridge`.
-
-Check whether Waydroid exposes hardware Vulkan to Android:
-
-```sh
-tools/waydroid_vulkan_probe.sh
-```
-
-On native Linux with a real DRM render node, configure Waydroid explicitly:
-
-```sh
-sudo tools/waydroid_vulkan_probe.sh --configure-waydroid-dri /dev/dri/renderD128
-```
-
-See `docs/hardware_vulkan_waydroid.md` for the WSL versus native Linux hardware
-Vulkan findings.
-
-Linux dma-buf descriptor receiver:
-
-```sh
-./build-wsl/host-bridge/axrb-host-bridge --serve-gpu-fds /tmp/axrb-gpu-frame.sock
-```
-
-This mode currently validates and logs dma-buf descriptors passed over a Unix domain socket. Vulkan import and OpenXR submission are the next steps for this path.
-
-Synthetic encoded-video UDP transport test:
-
-```powershell
-.\build\host-bridge\Debug\axrb-host-bridge.exe --video-recv-udp 38492 180
-```
-
-```sh
-./build-wsl/host-bridge/axrb-host-bridge --video-send-synthetic "$(ip route | awk '/default/ {print $3; exit}')" 38492 180 90
-```
-
-Visible UDP video feed into the Windows OpenXR/SteamVR bridge:
-
-```powershell
-.\build\host-bridge\Debug\axrb-host-bridge.exe --serve-openxr 38490
-```
-
-```sh
-./build-wsl/host-bridge/axrb-host-bridge --video-send-rgba "$(ip route | awk '/default/ {print $3; exit}')" 38492 900 90 160 90
-```
-
-This currently uses AXRB's debug RGBA video codec over the same UDP transport. It proves the transport and headset submission path, but it is not the final H.264/HEVC hardware encode/decode path yet.
-
-## Performance Direction
-
-The CPU path currently does this:
-
-```text
-GLES texture
-  -> glReadPixels
-  -> native local socket
-  -> runtime APK Java proxy
-  -> TCP
-  -> host receive buffer
-  -> D3D11 texture upload
-  -> OpenXR projection layer
-```
-
-This is intentionally simple and debuggable, but it will not reach headset-rate rendering.
-
-The intended high-performance Linux path is:
-
-```text
-Android/Waydroid Vulkan image
-  -> exported dma-buf / external memory
-  -> explicit sync
-  -> host Vulkan import
-  -> OpenXR compositor submission
-```
-
-That path should avoid CPU copies and is the correct next major milestone for low-latency rendering.
-See `docs/linux_gpu_transport.md` for the current implementation breakdown.
-
-## Legal And Compatibility Notes
-
-AXRB is intended for first-party tests, open samples, and owned development APKs. Do not use it to bypass DRM, anti-cheat, platform security, store restrictions, or application license terms.
+AXRB is licensed under the terms in [LICENSE](LICENSE). Third-party components
+and RiftLift attribution are listed in
+[launcher/THIRD_PARTY_NOTICES.md](launcher/THIRD_PARTY_NOTICES.md).

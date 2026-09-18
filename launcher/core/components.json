@@ -1,0 +1,42 @@
+[
+  {
+    "id": "emulator",
+    "name": "Android Emulator 36.5.11",
+    "url": "https://dl.google.com/android/repository/emulator-windows_x64-15261927.zip",
+    "size": 418625872,
+    "sha256": "e768552aed01356784c71ad26b6493340101cea56f38d17396efea638248f024",
+    "destination": "emulator",
+    "prefix": "emulator",
+    "probe": "emulator.exe"
+  },
+  {
+    "id": "platform-tools",
+    "name": "Android platform tools",
+    "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-win.zip",
+    "size": 8044989,
+    "sha256": "45f4d63113e895ebde0c90f194099a4676b6ac653bd28d54314a9e022bbc1a99",
+    "destination": "platform-tools",
+    "prefix": "platform-tools",
+    "probe": "adb.exe"
+  },
+  {
+    "id": "build-tools",
+    "name": "Android APK tools",
+    "url": "https://dl.google.com/android/repository/build-tools_r36.1_windows.zip",
+    "size": 59366211,
+    "sha256": "23189d2d52b40a070a05e9cf7e497c9563f67fee76902e8fd3135ef29ef4dbeb",
+    "destination": "build-tools/36.1.0",
+    "prefix": "android-16",
+    "probe": "aapt2.exe"
+  },
+  {
+    "id": "image",
+    "name": "Android 16 with ARM64 translation",
+    "url": "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-36_r07.zip",
+    "size": 1895447397,
+    "sha1": "c6bf44bdcd885bb902b4ba752d111a073ad7a817",
+    "destination": "system-images/android-36/google_apis/x86_64",
+    "prefix": "x86_64",
+    "probe": "system.img"
+  }
+]

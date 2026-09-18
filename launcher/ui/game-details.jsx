@@ -23,11 +23,12 @@ export function GameDetails({ game, state, local, onClose, run, pending, setPage
       <div className="space-y-5 p-6">
         <Cover game={game} className="aspect-video" />
         <div className="flex items-center gap-2">
-          {activeJob ? <Button variant="secondary" onClick={() => { onClose(); setPage('downloads'); }}><Loader2 className="animate-spin" />{activeJob.status === 'downloading' ? 'Downloading' : activeJob.status === 'installing' ? 'Installing' : 'Queued'}</Button>
+          {activeJob ? <Button variant="secondary" onClick={() => { onClose(); setPage('downloads'); }}><Loader2 className="animate-spin" />{{ downloading: 'Downloading', installing: 'Installing', importing: 'Importing', uninstalling: 'Uninstalling' }[activeJob.status] || 'Queued'}</Button>
             : running ? <Button disabled={busy} onClick={() => operate(async () => { await call('stop'); notify('Closing game'); })}>Stop</Button>
             : game.installed ? <Button className="min-w-24" disabled={busy || Boolean(state.running)} onClick={() => operate(async () => { await call('play', game.id); onClose(); })}>Play</Button>
             : game.apk ? <Button disabled={busy} onClick={install}>Install</Button>
             : !local ? <Button disabled={busy} onClick={() => operate(() => call('add', game.id))}><Plus />Add to library</Button>
+            : game.source !== 'meta' ? <Button disabled={busy} onClick={() => run('import', () => call('import'))}>Import APK</Button>
             : !state.signedIn ? <Button disabled={pending.has('account')} onClick={() => run('account', () => call('login'))}>Connect Meta</Button>
             : <Button disabled={busy} onClick={download}><Download />Download</Button>}
           <div className="flex-1" />
@@ -37,6 +38,7 @@ export function GameDetails({ game, state, local, onClose, run, pending, setPage
               {game.source === 'meta' && <><DropdownMenuItem disabled={busy || !state.signedIn} onSelect={() => loadExtra('builds')}>Versions</DropdownMenuItem><DropdownMenuItem disabled={busy || !state.signedIn} onSelect={() => loadExtra('dlc')}>Add-ons</DropdownMenuItem></>}
               {game.apk && <>{game.source === 'meta' && <DropdownMenuSeparator />}<DropdownMenuItem disabled={busy} onSelect={() => operate(async () => { await call('patch', game.id); notify('Patched'); })}>Patch with ovrport</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => operate(async () => { await call('importAssets', game.id); notify('Install to apply content files'); })}>Add content files</DropdownMenuItem><DropdownMenuItem onSelect={() => operate(() => call('openFolder', game.id))}>Open folder</DropdownMenuItem>{game.installed && <DropdownMenuItem disabled={busy} onSelect={install}>Update installation</DropdownMenuItem>}</>}
               {!game.apk && game.source !== 'meta' && <DropdownMenuItem disabled={busy} onSelect={() => run('import', () => call('import'))}>Import APK</DropdownMenuItem>}
+              {game.installed && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" disabled={busy || Boolean(state.running) || Boolean(activeJob)} onSelect={() => operate(() => call('uninstall', game.id))}>Uninstall</DropdownMenuItem></>}
             </DropdownMenuContent>
           </DropdownMenu>}
         </div>

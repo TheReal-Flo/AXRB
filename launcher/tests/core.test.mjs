@@ -68,6 +68,12 @@ test('download verifies complete payload and produces a digest', async t => {
   assert.equal(await fs.readFile(destination,'utf8'),'abcd'); assert.equal(result.bytes,4);
   assert.equal(result.sha256,createHash('sha256').update('abcd').digest('hex'));
 });
+test('download trusts streamed bytes when CDN content-length is transformed', async t => {
+  const dir = await temp(t), destination = path.join(dir, 'base.apk');
+  await downloadFile({ url:'https://securecdn.oculus.com/test', destination, size:4,
+    request:async () => new Response('abcd',{headers:{'content-length':'8','content-encoding':'gzip'}}) });
+  assert.equal(await fs.readFile(destination, 'utf8'), 'abcd');
+});
 test('interrupted downloads cannot be marked complete', async t => {
   const dir=await temp(t), destination=path.join(dir,'base.apk');
   await assert.rejects(downloadFile({url:'https://securecdn.oculus.com/test',destination,size:8,request:async()=>new Response('abcd')}),/before the complete/);
