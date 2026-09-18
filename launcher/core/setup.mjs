@@ -67,6 +67,11 @@ export class Setup {
     process.env.AXRB_DATA_HOME = path.join(this.directory, 'output');
     process.env.ANDROID_AVD_HOME = path.join(this.directory, 'avd');
     process.env.ANDROID_USER_HOME = path.join(this.directory, 'android');
+    // Keep AXRB's emulator transport away from Android Studio, Quest tools,
+    // and other emulators that may own the default ADB server on 5037.
+    process.env.ANDROID_ADB_SERVER_ADDRESS = '127.0.0.1';
+    process.env.ANDROID_ADB_SERVER_PORT = '5038';
+    delete process.env.ADB_SERVER_SOCKET;
     process.env.ANDROID_HOME = this.runtime.settings.sdk;
     process.env.ANDROID_SDK_ROOT = this.runtime.settings.sdk;
   }

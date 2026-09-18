@@ -16,6 +16,9 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../paths.ps1"
 . "$PSScriptRoot/gpu_validation.ps1"
+$env:ANDROID_ADB_SERVER_ADDRESS = '127.0.0.1'
+$env:ANDROID_ADB_SERVER_PORT = '5038'
+$env:ADB_SERVER_SOCKET = $null
 if ($Port % 2) { throw 'Emulator console port must be even.' }
 $adb = Join-Path $Sdk 'platform-tools\adb.exe'
 $emulator = Join-Path $Sdk 'emulator\emulator.exe'
@@ -98,7 +101,8 @@ switch ($Action) {
         $systemImage = Join-Path $Sdk "system-images\android-$ApiLevel\google_apis\x86_64\system.img"
         Require-Path $systemImage 'Android system image'
         Run $emulator @('-accel-check')
-        Write-Output "Android startup diagnostic: SDK=$Sdk; AVD=$Avd; port=$Port; image=$systemImage"
+        $adbPort = $Port + 1
+        Write-Output "Android startup diagnostic: SDK=$Sdk; AVD=$Avd; console=$Port; adb=$adbPort; server=127.0.0.1:5038; image=$systemImage"
         $drive = [IO.Path]::GetPathRoot($(if ($env:ANDROID_AVD_HOME) { $env:ANDROID_AVD_HOME } else { $Sdk }))
         if ($drive) {
             $freeGB = (Get-PSDrive -Name $drive.TrimEnd(':\') -ErrorAction SilentlyContinue).Free / 1GB
@@ -121,7 +125,9 @@ switch ($Action) {
             }
         }
         New-Item -ItemType Directory -Force $logs | Out-Null
-        $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-boot-anim', '-memory', "$MemoryMB")
+        # Declare both ports explicitly. This avoids the emulator frontend and
+        # raw QEMU clock launcher disagreeing about the ADB port.
+        $arguments = @('-avd', $Avd, '-ports', "$Port,$adbPort", '-gpu', 'host', '-accel', 'on', '-no-boot-anim', '-memory', "$MemoryMB")
         if ($PSBoundParameters.ContainsKey('CpuCores')) { $arguments += @('-cores', "$CpuCores") }
         if (!$ShowWindow) { $arguments += '-no-window' }
         if ($GuestClock -ne 'Default') {

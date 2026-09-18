@@ -19,6 +19,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../paths.ps1"
+$env:ANDROID_ADB_SERVER_ADDRESS = '127.0.0.1'
+$env:ANDROID_ADB_SERVER_PORT = '5038'
+$env:ADB_SERVER_SOCKET = $null
 if (!$HostExe) { $HostExe = $AxrbHostExe }
 if (!$PSBoundParameters.ContainsKey('GpuSharing')) {
     $GpuSharing = Test-Path "$AxrbGpuDirectory/axrb_gpu_layer.json"
