@@ -179,11 +179,15 @@ switch ($Action) {
         do {
             Start-Sleep -Seconds 2
             $ErrorActionPreference = 'Continue'
-            $boot = Invoke-ExternalWithTimeout $adb @('-s', $serial, 'shell', 'getprop', 'sys.boot_completed') 10
+            # ADB commonly reports `offline` while adbd is starting. Treat
+            # that as a retryable state instead of aborting the whole launch.
+            $boot = ''
+            try { $boot = Invoke-ExternalWithTimeout $adb @('-s', $serial, 'shell', 'getprop', 'sys.boot_completed') 10 } catch { $boot = '' }
             $ErrorActionPreference = 'Stop'
             if ($boot -eq '1') { break }
             if (((Get-Date) - $lastDiagnostic).TotalSeconds -ge 30) {
-                $adbState = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'get-state') 10) -join ''
+                $adbState = 'offline'
+                try { $adbState = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'get-state') 10) -join '' } catch { }
                 $adbText = $adbState.Trim(); if (!$adbText) { $adbText = 'offline' }
                 Write-Output ("Android startup diagnostic: {0}s elapsed; adb={1}; boot={2}; processExited={3}" -f [int]((Get-Date) - $startedAt).TotalSeconds, $adbText, ($boot -join '').Trim(), $process.HasExited)
                 $lastDiagnostic = Get-Date
