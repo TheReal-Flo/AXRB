@@ -35,7 +35,7 @@ export function avdConfig(image, settings) {
     'hw.lcd.density': 420, 'hw.keyboard': 'no', 'hw.mainKeys': 'no', 'hw.useext4': 'yes',
     'disk.dataPartition.size': `${settings.storageGB ?? 32}G`, 'disk.cachePartition.size': '66MB', 'vm.heapSize': 576,
     'image.sysdir.1': image + path.sep, 'tag.id': 'google_apis', target: 'android-36',
-    'fastboot.forceColdBoot': 'yes', 'fastboot.forceFastBoot': 'no', 'showDeviceFrame': 'no',
+    'fastboot.forceColdBoot': 'no', 'fastboot.forceFastBoot': 'yes', 'showDeviceFrame': 'no',
     'runtime.network.speed': 'full', 'runtime.network.latency': 'none', 'PlayStore.enabled': 'no',
   }).map(([key, value]) => `${key}=${value}`).join('\n') + '\n';
 }

@@ -67,8 +67,22 @@ switch ($Action) {
         Run $emulator @('-accel-check')
         $devices = & $adb devices
         if ($devices -match "^$serial\s") { throw "$serial already exists; use Verify or Stop first." }
+        # Managed installations should reuse Android's quick-boot snapshot. Older
+        # AXRB images were created with cold-boot settings; migrate that setting
+        # in place so every launch does not rebuild Android from scratch.
+        if ($Avd -eq 'axrb-managed-api36' -and $env:ANDROID_AVD_HOME) {
+            $managedConfig = Join-Path $env:ANDROID_AVD_HOME "$Avd.avd\config.ini"
+            if (Test-Path -LiteralPath $managedConfig) {
+                $configText = Get-Content -LiteralPath $managedConfig -Raw
+                $configText = $configText -replace '(?m)^fastboot\.forceColdBoot=.*$', 'fastboot.forceColdBoot=no'
+                $configText = $configText -replace '(?m)^fastboot\.forceFastBoot=.*$', 'fastboot.forceFastBoot=yes'
+                if ($configText -notmatch '(?m)^fastboot\.forceColdBoot=') { $configText += "`nfastboot.forceColdBoot=no`n" }
+                if ($configText -notmatch '(?m)^fastboot\.forceFastBoot=') { $configText += "`nfastboot.forceFastBoot=yes`n" }
+                Set-Content -LiteralPath $managedConfig -Value $configText -Encoding ascii
+            }
+        }
         New-Item -ItemType Directory -Force $logs | Out-Null
-        $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', "$MemoryMB")
+        $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-boot-anim', '-memory', "$MemoryMB")
         if ($env:AXRB_DATA_HOME) { $arguments += @('-feature', '-QuickbootFileBacked') }
         if ($PSBoundParameters.ContainsKey('CpuCores')) { $arguments += @('-cores', "$CpuCores") }
         if (!$ShowWindow) { $arguments += '-no-window' }
