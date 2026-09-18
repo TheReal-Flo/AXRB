@@ -25,7 +25,7 @@ if (!$HostExe) { $HostExe = $AxrbHostExe }
 if (!$PSBoundParameters.ContainsKey('GpuSharing')) {
     $GpuSharing = Test-Path "$AxrbGpuDirectory/axrb_gpu_layer.json"
 }
-if ($Activity.Split('/')[0] -ne $Package) { throw 'Activity must belong to Package.' }
+if (([string]$Activity).Split('/')[0] -ne $Package) { throw 'Activity must belong to Package.' }
 $HostExe = (Resolve-Path -LiteralPath $HostExe).Path
 $adb = Join-Path $Sdk 'platform-tools\adb.exe'
 $serial = "emulator-$Port"
@@ -50,11 +50,14 @@ function Invoke-Adb([string[]]$Arguments, [int]$TimeoutMs = 10000) {
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $child = [System.Diagnostics.Process]::Start($info)
+    if ($null -eq $child) { throw 'ADB could not be started.' }
     try {
         $stdout = $child.StandardOutput.ReadToEndAsync()
         $stderr = $child.StandardError.ReadToEndAsync()
         if (!$child.WaitForExit($TimeoutMs)) { $child.Kill(); throw 'ADB timed out.' }
-        return @{ Code = $child.ExitCode; Text = $stdout.Result.Trim(); Error = $stderr.Result.Trim() }
+        [string]$stdoutText = $stdout.Result
+        [string]$stderrText = $stderr.Result
+        return @{ Code = $child.ExitCode; Text = $stdoutText.Trim(); Error = $stderrText.Trim() }
     } finally { $child.Dispose() }
 }
 
@@ -76,7 +79,8 @@ try {
         $ownsEmulator = $true
     } elseif ($PSBoundParameters.ContainsKey('Avd')) {
         $runningAvd = Invoke-Adb @('emu', 'avd', 'name')
-        $runningName = ($runningAvd.Text -split '\r?\n')[0].Trim()
+        [string]$runningText = $runningAvd.Text
+        $runningName = ($runningText -split '\r?\n')[0].Trim()
         if ($runningAvd.Code -ne 0 -or $runningName -ne $Avd) {
             throw "$serial is running AVD '$runningName', but '$Avd' was requested. Stop that emulator first or use another port."
         }

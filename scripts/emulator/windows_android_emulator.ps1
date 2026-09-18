@@ -30,7 +30,7 @@ function Require-Path([string]$Path, [string]$Description) {
 }
 function Read-LogTail {
     $files = @("$logs\emulator.stdout.log", "$logs\emulator.stderr.log")
-    (($files | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-Content -LiteralPath $_ -Tail 12 -ErrorAction SilentlyContinue }) -join ' ').Trim()
+    ([string](($files | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-Content -LiteralPath $_ -Tail 12 -ErrorAction SilentlyContinue }) -join ' ')).Trim()
 }
 function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
@@ -43,6 +43,7 @@ function Invoke-ExternalWithTimeout([string]$Exe, [string[]]$Arguments, [int]$Ti
     $quoted = $Arguments | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }
     try {
         $process = Start-Process -FilePath $Exe -ArgumentList ($quoted -join ' ') -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        if ($null -eq $process) { throw "Could not start $Exe." }
         if (!$process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill(); $process.WaitForExit(5000)
             throw "$Exe timed out after $TimeoutSeconds seconds."
@@ -86,12 +87,13 @@ function Verify-Gpu {
 }
 function Verify-Abi {
     Write-Output 'Android startup diagnostic: checking guest ABI.'
-    $abis = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'shell', 'getprop', 'ro.product.cpu.abilist') 30) -join ''
+    [string]$abis = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'shell', 'getprop', 'ro.product.cpu.abilist') -join '')
     if ($Abi -notin $abis.Trim().Split(',')) {
         throw "Guest does not support requested ABI $Abi (advertised: $abis)."
     }
     if ($Abi -eq 'arm64-v8a') {
-        $bridge = ((& $adb -s $serial shell getprop ro.dalvik.vm.native.bridge) -join '').Trim()
+        [string]$bridge = ((& $adb -s $serial shell getprop ro.dalvik.vm.native.bridge) -join '')
+        $bridge = $bridge.Trim()
         if ($LASTEXITCODE -ne 0 -or !$bridge -or $bridge -eq '0') {
             throw 'ARM64 on this x86_64 AVD requires an enabled native bridge.'
         }
@@ -129,7 +131,7 @@ switch ($Action) {
         $devices = Invoke-ExternalWithTimeout $adb @('devices') 15
         $existingState = ''
         if ($devices -match "^$serial\s") {
-            try { $existingState = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'get-state') 10).Trim() } catch { }
+            try { $existingState = [string](Invoke-ExternalWithTimeout $adb @('-s', $serial, 'get-state') 10); $existingState = $existingState.Trim() } catch { }
             if ($existingState -eq 'device') { throw "$serial is already running; use Verify or Stop first." }
             Write-Output "Android startup diagnostic: $serial is offline; cleaning up its stale managed emulator."
         }
@@ -147,7 +149,7 @@ switch ($Action) {
         if ($Avd -eq 'axrb-managed-api36' -and $env:ANDROID_AVD_HOME) {
             $managedConfig = Join-Path $env:ANDROID_AVD_HOME "$Avd.avd\config.ini"
             if (Test-Path -LiteralPath $managedConfig) {
-                $configText = Get-Content -LiteralPath $managedConfig -Raw
+                [string]$configText = Get-Content -LiteralPath $managedConfig -Raw
                 $configText = $configText -replace '(?m)^fastboot\.forceColdBoot=.*$', 'fastboot.forceColdBoot=no'
                 $configText = $configText -replace '(?m)^fastboot\.forceFastBoot=.*$', 'fastboot.forceFastBoot=yes'
                 if ($configText -notmatch '(?m)^fastboot\.forceColdBoot=') { $configText += "`nfastboot.forceColdBoot=no`n" }
@@ -227,8 +229,10 @@ switch ($Action) {
             if (((Get-Date) - $lastDiagnostic).TotalSeconds -ge 30) {
                 $adbState = 'offline'
                 try { $adbState = (Invoke-ExternalWithTimeout $adb @('-s', $serial, 'get-state') 10) -join '' } catch { }
-                $adbText = $adbState.Trim(); if (!$adbText) { $adbText = 'offline' }
-                Write-Output ("Android startup diagnostic: {0}s elapsed; adb={1}; boot={2}; processExited={3}" -f [int]((Get-Date) - $startedAt).TotalSeconds, $adbText, ($boot -join '').Trim(), $process.HasExited)
+                [string]$adbText = $adbState
+                $adbText = $adbText.Trim(); if (!$adbText) { $adbText = 'offline' }
+                $bootText = [string]($boot -join '')
+                Write-Output ("Android startup diagnostic: {0}s elapsed; adb={1}; boot={2}; processExited={3}" -f [int]((Get-Date) - $startedAt).TotalSeconds, $adbText, $bootText.Trim(), $process.HasExited)
                 if ($adbText -eq 'offline') {
                     if (!$adbReconnectAttempted) {
                         Write-Output 'Android startup diagnostic: reconnecting offline ADB transport.'
@@ -256,7 +260,7 @@ switch ($Action) {
             throw
         }
         if ($GuestClock -ne 'Default') {
-            $clock = (& $adb -s $serial shell su 0 cat /sys/devices/system/clocksource/clocksource0/current_clocksource) -join ''
+            [string]$clock = (& $adb -s $serial shell su 0 cat /sys/devices/system/clocksource/clocksource0/current_clocksource) -join ''
             if ($clock.Trim() -eq 'tsc') { Write-Host 'Guest clock: TSC (accepted by Linux stability checks).' }
             else { Write-Warning "Guest retained '$($clock.Trim())'; the requested TSC optimization is not active. Stability checks were not overridden." }
         }
