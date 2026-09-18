@@ -56,7 +56,7 @@ export class Runtime {
     }
     await run('powershell.exe', powershellArgs(path.join(this.root, 'scripts/emulator/windows_android_emulator.ps1'), {
       Action: 'Start', Avd: this.settings.avd, Port: this.settings.port, Sdk: this.settings.sdk,
-      Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, CpuCores: this.settings.cpuCores ?? 4, GuestClock: this.settings.guestClock || 'Default', GpuSharing: true
+      ApiLevel: 36, Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, CpuCores: this.settings.cpuCores ?? 4, GuestClock: this.settings.guestClock || 'Default', GpuSharing: true
     }), { timeout: 10 * 60 * 1000 });
   }
   async inspect(apk, { allowSplit = false } = {}) {
