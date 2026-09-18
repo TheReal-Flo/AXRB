@@ -77,7 +77,7 @@ switch ($Action) {
         $systemImage = Join-Path $Sdk "system-images\android-$ApiLevel\google_apis\x86_64\system.img"
         Require-Path $systemImage 'Android system image'
         Run $emulator @('-accel-check')
-        Write-Host "Android startup diagnostic: SDK=$Sdk; AVD=$Avd; port=$Port; image=$systemImage"
+        Write-Output "Android startup diagnostic: SDK=$Sdk; AVD=$Avd; port=$Port; image=$systemImage"
         $drive = [IO.Path]::GetPathRoot($(if ($env:ANDROID_AVD_HOME) { $env:ANDROID_AVD_HOME } else { $Sdk }))
         if ($drive) {
             $freeGB = (Get-PSDrive -Name $drive.TrimEnd(':\') -ErrorAction SilentlyContinue).Free / 1GB
@@ -156,12 +156,14 @@ switch ($Action) {
             if (((Get-Date) - $lastDiagnostic).TotalSeconds -ge 30) {
                 $adbState = (& $adb -s $serial get-state 2>$null) -join ''
                 $adbText = $adbState.Trim(); if (!$adbText) { $adbText = 'offline' }
-                Write-Host ("Android startup diagnostic: {0}s elapsed; adb={1}; boot={2}; processExited={3}" -f [int]((Get-Date) - $startedAt).TotalSeconds, $adbText, ($boot -join '').Trim(), $process.HasExited)
+                Write-Output ("Android startup diagnostic: {0}s elapsed; adb={1}; boot={2}; processExited={3}" -f [int]((Get-Date) - $startedAt).TotalSeconds, $adbText, ($boot -join '').Trim(), $process.HasExited)
                 $lastDiagnostic = Get-Date
             }
             if ($process.HasExited) {
-                $detail = Get-Content "$logs/emulator.stdout.log", "$logs/emulator.stderr.log" -ErrorAction SilentlyContinue | Where-Object { $_ -match 'FATAL|ERROR|failed' } | Select-Object -Last 3
-                throw "Emulator exited ($($process.ExitCode)). $($detail -join ' ') See $logs"
+                $process.Refresh()
+                $exitCode = try { [string]$process.ExitCode } catch { 'unknown' }
+                $detail = Read-LogTail
+                throw "Emulator exited ($exitCode). Recent emulator output: $detail Logs: $logs\emulator.stdout.log and $logs\emulator.stderr.log"
             }
         } while ((Get-Date) -lt $deadline)
         if ($boot -ne '1') { throw "Android did not finish booting within 8 minutes. Last emulator output: $(Read-LogTail) Logs: $logs\emulator.stdout.log and $logs\emulator.stderr.log" }
