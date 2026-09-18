@@ -110,7 +110,9 @@ switch ($Action) {
             $env:PATH = $oldPath
             $env:ANDROID_EMULATOR_LAUNCHER_DIR = $oldLauncherDir
         }
-        $deadline = (Get-Date).AddMinutes(3)
+        # First boot after installing an image can take several minutes while
+        # Android creates userdata and compiles system services.
+        $deadline = (Get-Date).AddMinutes(8)
         do {
             Start-Sleep -Seconds 2
             $ErrorActionPreference = 'Continue'
@@ -122,7 +124,7 @@ switch ($Action) {
                 throw "Emulator exited ($($process.ExitCode)). $($detail -join ' ') See $logs"
             }
         } while ((Get-Date) -lt $deadline)
-        if ($boot -ne '1') { throw "Boot timed out; see $logs" }
+        if ($boot -ne '1') { throw "Android did not finish booting within 8 minutes; see $logs\emulator.stdout.log and $logs\emulator.stderr.log" }
         try { Verify-Gpu; Verify-Abi } catch {
             & $adb -s $serial emu kill | Out-Null
             throw
