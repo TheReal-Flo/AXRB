@@ -76,7 +76,7 @@
       "deleteAppDataOnUninstall": false,
       "createDesktopShortcut": true,
       "shortcutName": "AXRB",
-      "runAfterFinish": false
+      "runAfterFinish": true
     },
     "beforePack": "./verify-release.cjs"
   }
